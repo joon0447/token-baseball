@@ -80,7 +80,7 @@ struct ContentView: View {
                 switch page ?? .home {
                 case .home: HomeView { page = $0 }
                 case .shop: ShopView()
-                case .collection: ContentUnavailableView("보유 카드", systemImage: "rectangle.stack")
+                case .collection: CollectionView { page = $0 }
                 case .roster: ContentUnavailableView("내 선수단", systemImage: "baseball.diamond.bases")
                 case .settings: SettingsView()
                 }
