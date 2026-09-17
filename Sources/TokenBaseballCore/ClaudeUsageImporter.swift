@@ -6,6 +6,7 @@ public struct ClaudeUsageImporter: Sendable {
     public init() {}
 
     public func read(folder: URL) throws -> [UsageSnapshot] {
+        try Task.checkCancellation()
         let manager = FileManager.default
         try requireReadableDirectory(folder)
         let projects = folder.appendingPathComponent("projects", isDirectory: true)
@@ -35,6 +36,7 @@ public struct ClaudeUsageImporter: Sendable {
 
         var usageByMessage: [String: TokenUsage] = [:]
         for case let file as URL in files {
+            try Task.checkCancellation()
             guard file.pathExtension.lowercased() == "jsonl",
                   file.lastPathComponent != "history.jsonl" else { continue }
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
@@ -83,6 +85,7 @@ public struct ClaudeUsageImporter: Sendable {
         var pending = Data()
         var line = 1
         while true {
+            try Task.checkCancellation()
             let chunk: Data
             do { chunk = try handle.read(upToCount: 64 * 1_024) ?? Data() }
             catch { throw ClaudeUsageImportError.fileUnavailable(file.lastPathComponent) }

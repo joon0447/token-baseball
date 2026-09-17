@@ -3,6 +3,20 @@ import XCTest
 @testable import TokenBaseballCore
 
 final class ClaudeUsageImporterTests: XCTestCase {
+    @MainActor
+    func testCancelledTaskStopsBeforeReadingFolder() async {
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try ClaudeUsageImporter().read(folder: URL(fileURLWithPath: "/not-read-when-cancelled"))
+        }
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled import should throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     private let importer = ClaudeUsageImporter()
 
     func testCountsEachCacheCategoryOnceAndIgnoresNestedBreakdown() throws {

@@ -5,7 +5,7 @@ import Foundation
 /// This local file format is not a stable, public usage API.
 public struct CodexUsageImporter: Sendable {
     private static let maximumLineBytes = 16 * 1_024 * 1_024
-    private static let maximumReadBytes = 1_024 * 1_024 * 1_024
+    private static let maximumReadBytes = 8 * 1_024 * 1_024 * 1_024
     private static let maximumFiles = 10_000
     private static let maximumEntries = 100_000
 
@@ -14,6 +14,7 @@ public struct CodexUsageImporter: Sendable {
     /// Returns one maximum cumulative count per session, including archived copies.
     /// Throws without returning partial results when any complete record is invalid.
     public func read(folder: URL) throws -> [UsageSnapshot] {
+        try Task.checkCancellation()
         guard folder.isFileURL else { throw CodexUsageImportError.invalidFolder }
         let manager = FileManager.default
         var isDirectory: ObjCBool = false
@@ -38,6 +39,7 @@ public struct CodexUsageImporter: Sendable {
         var totals: [String: Int64] = [:]
         var bytesRead = 0
         for file in files {
+            try Task.checkCancellation()
             if let session = try readFile(file, bytesRead: &bytesRead) {
                 totals[session.id] = max(totals[session.id] ?? 0, session.tokens)
             }
@@ -50,6 +52,7 @@ public struct CodexUsageImporter: Sendable {
         var entries = 0
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
         for root in roots {
+            try Task.checkCancellation()
             var traversalError: Error?
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
@@ -61,6 +64,7 @@ public struct CodexUsageImporter: Sendable {
                 }
             ) else { throw CodexUsageImportError.unreadableFolder }
             for case let file as URL in enumerator {
+                try Task.checkCancellation()
                 entries += 1
                 guard entries <= Self.maximumEntries else { throw CodexUsageImportError.resourceLimit }
                 let values = try file.resourceValues(forKeys: keys)
@@ -85,6 +89,7 @@ public struct CodexUsageImporter: Sendable {
         var maximumTokens: Int64?
         var lineNumber = 0
         while let chunk = try handle.read(upToCount: 64 * 1_024), !chunk.isEmpty {
+            try Task.checkCancellation()
             bytesRead += chunk.count
             guard bytesRead <= Self.maximumReadBytes else { throw CodexUsageImportError.resourceLimit }
             pending.append(chunk)
@@ -123,8 +128,13 @@ public struct CodexUsageImporter: Sendable {
         }
         switch record["type"] as? String {
         case "session_meta":
-            guard let payload = record["payload"] as? [String: Any],
-                  let id = payload["id"] as? String,
+            guard let payload = record["payload"] as? [String: Any] else {
+                throw CodexUsageImportError.invalidSessionMetadata(line: lineNumber)
+            }
+            // Desktop transcripts can append new metadata IDs on resume while
+            // retaining a stable session_id. Older CLI records expose only id.
+            let rawID = payload["session_id"] ?? payload["id"]
+            guard let id = rawID as? String,
                   !id.isEmpty, id.utf8.count <= 256,
                   id.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else {
                 throw CodexUsageImportError.invalidSessionMetadata(line: lineNumber)

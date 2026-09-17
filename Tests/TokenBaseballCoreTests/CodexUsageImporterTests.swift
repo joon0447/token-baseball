@@ -3,7 +3,54 @@ import XCTest
 @testable import TokenBaseballCore
 
 final class CodexUsageImporterTests: XCTestCase {
+    @MainActor
+    func testCancelledTaskStopsBeforeReadingFolder() async {
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try CodexUsageImporter().read(folder: URL(fileURLWithPath: "/not-read-when-cancelled"))
+        }
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled import should throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     private let importer = CodexUsageImporter()
+
+    func testDesktopSessionIDRemainsStableAcrossResumedMetadataAndCopiedFiles() throws {
+        try withFolder { folder in
+            let first = #"{"type":"session_meta","payload":{"id":"metadata-one","session_id":"stable-session"}}"#
+            let resumed = #"{"type":"session_meta","payload":{"id":"metadata-two","session_id":"stable-session"}}"#
+            try write([first, tokens("100"), resumed, tokens("150")], to: "sessions/one.jsonl", in: folder)
+            try write([resumed, tokens("170")], to: "archived_sessions/copy.jsonl", in: folder)
+            XCTAssertEqual(try importer.read(folder: folder), [UsageSnapshot(sourceID: "codex:stable-session", totalTokens: 170)])
+        }
+    }
+
+    func testPresentButInvalidDesktopSessionIDDoesNotFallBackToMetadataID() throws {
+        for value in ["null", "123", "false", "\"\"", "\"two words\""] {
+            try withFolder { folder in
+                let record = #"{"type":"session_meta","payload":{"id":"valid-metadata","session_id":"# + value + "}}"
+                try write([record, tokens("100")], to: "session.jsonl", in: folder)
+                XCTAssertThrowsError(try importer.read(folder: folder)) { error in
+                    XCTAssertEqual(error as? CodexUsageImportError, .invalidSessionMetadata(line: 1))
+                }
+            }
+        }
+    }
+
+    func testConflictingDesktopSessionIDsStillFail() throws {
+        try withFolder { folder in
+            let first = #"{"type":"session_meta","payload":{"id":"metadata","session_id":"session-a"}}"#
+            let different = #"{"type":"session_meta","payload":{"id":"metadata","session_id":"session-b"}}"#
+            try write([first, tokens("100"), different], to: "session.jsonl", in: folder)
+            XCTAssertThrowsError(try importer.read(folder: folder)) { error in
+                XCTAssertEqual(error as? CodexUsageImportError, .invalidSessionMetadata(line: 3))
+            }
+        }
+    }
 
     func testCumulativeMaximumAndArchiveCopiesAreDeduplicated() throws {
         try withFolder { folder in
