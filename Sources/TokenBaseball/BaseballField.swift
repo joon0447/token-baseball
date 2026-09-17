@@ -12,7 +12,7 @@ struct BaseballField<Slot: View>: View {
     var body: some View {
         GeometryReader { geometry in
             let slotWidth = max(0, min(76, geometry.size.width * 0.17))
-            let portraitSize = max(0, min(32, slotWidth - 8))
+            let portraitSize = max(0, min(48, slotWidth - 8))
             ZStack {
                 BaseballGrass().fill(Color.green.opacity(0.12))
                 BaseballDiamond().fill(Color.brown.opacity(0.12))
@@ -20,7 +20,7 @@ struct BaseballField<Slot: View>: View {
                 ForEach(FieldPosition.allCases) { position in
                     let point = fieldPoint(position)
                     slot(position, portraitSize)
-                        .frame(width: slotWidth, height: 72)
+                        .frame(width: slotWidth, height: 88)
                         .position(x: geometry.size.width * point.x, y: geometry.size.height * point.y)
                 }
             }
