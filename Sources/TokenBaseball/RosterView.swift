@@ -36,18 +36,18 @@ struct RosterView: View {
                 BaseballDiamond().stroke(Color.primary.opacity(0.24), lineWidth: 2)
                 ForEach(FieldPosition.allCases) { position in
                     let point = fieldPoint(position)
-                    fieldSlot(position)
-                        .frame(width: min(116, geometry.size.width * 0.185), height: 116)
+                    fieldSlot(position, portraitSize: max(0, min(84, geometry.size.width * 0.185 - 12)))
+                        .frame(width: min(128, geometry.size.width * 0.185), height: 140)
                         .position(x: geometry.size.width * point.x, y: geometry.size.height * point.y)
                 }
             }
         }
-        .frame(height: 560)
+        .frame(height: 640)
         .frame(maxWidth: 900)
         .frame(maxWidth: .infinity)
     }
 
-    private func fieldSlot(_ position: FieldPosition) -> some View {
+    private func fieldSlot(_ position: FieldPosition, portraitSize: CGFloat) -> some View {
         let card = model.state.lineup[position.rawValue].flatMap { model.card($0) }
         let available = availableCards(for: position, currentID: card?.id)
         return Menu {
@@ -65,26 +65,7 @@ struct RosterView: View {
                 Button("선수단에서 제외") { model.perform { try $0.remove(from: position) } }
             }
         } label: {
-            VStack(spacing: 4) {
-                Text("\(position.abbreviation) · \(position.title)")
-                    .font(.caption.weight(.semibold))
-                if let card {
-                    PlayerPortrait(data: card.photoData, tier: card.tier, size: 36)
-                    Text(card.name).font(.callout.weight(.semibold)).lineLimit(1)
-                    TierLabel(tier: card.tier)
-                } else {
-                    Image(systemName: "person.crop.square.badge.plus")
-                        .font(.title2).frame(height: 36).accessibilityHidden(true)
-                    Text("선수 등록").font(.callout.weight(.semibold))
-                    Text("빈자리").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 6)
-            .background(.background, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.16)))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            RosterFieldCard(card: card, position: position, portraitSize: portraitSize)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -103,7 +84,7 @@ struct RosterView: View {
                 Text(position.title).font(.caption).foregroundStyle(.secondary)
             }.frame(width: 64, alignment: .leading)
             if let card {
-                PlayerPortrait(data: card.photoData, tier: card.tier, size: 44)
+                RosterPlayerPortrait(card: card, size: 44)
                 Text(card.name).font(.headline).lineLimit(1)
                 TierLabel(tier: card.tier)
             } else {

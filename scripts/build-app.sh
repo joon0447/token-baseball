@@ -5,8 +5,9 @@ configuration="${1:-debug}"
 swift build -c "$configuration"
 bin_dir="$(swift build -c "$configuration" --show-bin-path)"
 app_dir="$PWD/build/TokenBaseball.app"
-mkdir -p "$app_dir/Contents/MacOS"
+mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$bin_dir/TokenBaseball" "$app_dir/Contents/MacOS/TokenBaseball"
+ditto "$bin_dir/TokenBaseball_TokenBaseball.bundle" "$app_dir/Contents/Resources/TokenBaseball_TokenBaseball.bundle"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

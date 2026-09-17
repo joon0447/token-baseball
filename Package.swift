@@ -7,7 +7,8 @@ let package = Package(
     products: [.executable(name: "TokenBaseball", targets: ["TokenBaseball"])],
     targets: [
         .target(name: "TokenBaseballCore"),
-        .executableTarget(name: "TokenBaseball", dependencies: ["TokenBaseballCore"]),
+        .executableTarget(name: "TokenBaseball", dependencies: ["TokenBaseballCore"],
+                          resources: [.process("Resources")]),
         .testTarget(name: "TokenBaseballCoreTests", dependencies: ["TokenBaseballCore"])
     ]
 )
