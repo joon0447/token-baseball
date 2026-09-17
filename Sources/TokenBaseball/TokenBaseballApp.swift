@@ -81,7 +81,7 @@ struct ContentView: View {
                 case .home: HomeView { page = $0 }
                 case .shop: ShopView()
                 case .collection: CollectionView { page = $0 }
-                case .roster: ContentUnavailableView("내 선수단", systemImage: "baseball.diamond.bases")
+                case .roster: RosterView { page = $0 }
                 case .settings: SettingsView()
                 }
             }
