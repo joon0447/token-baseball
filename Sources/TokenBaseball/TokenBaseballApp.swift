@@ -25,6 +25,14 @@ struct TokenBaseballApp: App {
                     .disabled(model.isImporting || model.loadError != nil)
             }
         }
+        MenuBarExtra {
+            StatusMenuView().environmentObject(model)
+        } label: {
+            Label(model.loadError == nil ? "오늘 \(TokenDisplay.short(model.todayTokens)) 토큰" : "토큰 오류", systemImage: "baseball")
+                .monospacedDigit()
+                .help("오늘 사용한 토큰 \(model.todayTokens.formatted())개")
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
