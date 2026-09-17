@@ -11,8 +11,8 @@ struct BaseballField<Slot: View>: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let slotWidth = max(0, min(76, geometry.size.width * 0.17))
-            let portraitSize = max(0, min(48, slotWidth - 8))
+            let slotWidth = max(82, min(88, geometry.size.width * 0.19))
+            let portraitSize: CGFloat = 74
             ZStack {
                 BaseballGrass().fill(Color.green.opacity(0.12))
                 BaseballDiamond().fill(Color.brown.opacity(0.12))
@@ -20,12 +20,12 @@ struct BaseballField<Slot: View>: View {
                 ForEach(FieldPosition.allCases) { position in
                     let point = fieldPoint(position)
                     slot(position, portraitSize)
-                        .frame(width: slotWidth, height: 88)
+                        .frame(width: slotWidth, height: 114)
                         .position(x: geometry.size.width * point.x, y: geometry.size.height * point.y)
                 }
             }
         }
-        .frame(height: 520)
+        .frame(height: 600)
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity)
     }
@@ -33,9 +33,9 @@ struct BaseballField<Slot: View>: View {
     /// View from home: outfield behind the diamond, infield around the bases, catcher behind home.
     private func fieldPoint(_ position: FieldPosition) -> CGPoint {
         switch position {
-        case .leftField: CGPoint(x: 0.20, y: 0.26)
+        case .leftField: CGPoint(x: 0.18, y: 0.26)
         case .centerField: CGPoint(x: 0.50, y: 0.14)
-        case .rightField: CGPoint(x: 0.80, y: 0.26)
+        case .rightField: CGPoint(x: 0.82, y: 0.26)
         case .shortstop: CGPoint(x: 0.38, y: 0.42)
         case .secondBase: CGPoint(x: 0.62, y: 0.42)
         case .thirdBase: CGPoint(x: 0.25, y: 0.64)
