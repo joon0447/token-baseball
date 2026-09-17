@@ -4,6 +4,7 @@ import TokenBaseballCore
 struct RosterView: View {
     @EnvironmentObject private var model: AppModel
     let navigate: (AppPage) -> Void
+    @State private var selectedPosition: FieldPosition?
 
     var body: some View {
         ScrollView {
@@ -37,28 +38,50 @@ struct RosterView: View {
     private func fieldSlot(_ position: FieldPosition, portraitSize: CGFloat) -> some View {
         let card = model.state.lineup[position.rawValue].flatMap { model.card($0) }
         let available = availableCards(for: position, currentID: card?.id)
-        return Menu {
-            if available.isEmpty {
-                Text("교체할 \(position.title) 카드가 없어요")
-            } else {
-                ForEach(available) { candidate in
-                    Button("\(candidate.name) · \(candidate.tier.title)") {
-                        model.perform { try $0.assign(cardID: candidate.id, to: position) }
-                    }
-                }
-            }
-            if card != nil {
-                Divider()
-                Button("선수단에서 제외") { model.perform { try $0.remove(from: position) } }
-            }
+        return Button {
+            selectedPosition = position
         } label: {
             RosterFieldCard(card: card, position: position, portraitSize: portraitSize)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        // A native Menu extracts the label's NSImage and can discard SwiftUI sizing/clipping.
+        .buttonStyle(.plain)
+        .popover(isPresented: Binding(
+            get: { selectedPosition == position },
+            set: { if !$0, selectedPosition == position { selectedPosition = nil } }
+        )) {
+            positionPicker(position, card: card, available: available)
+        }
         .disabled(card == nil && available.isEmpty)
         .accessibilityLabel("\(position.title), \(card.map { "\($0.name), \($0.tier.title)" } ?? "빈자리"), \(card == nil ? "선수 등록" : "선수 교체 또는 제외")")
         .help("\(position.title) 선수를 선택하세요. 선수의 포지션은 변경할 수 없어요.")
+    }
+
+    private func positionPicker(_ position: FieldPosition, card: PlayerCard?, available: [PlayerCard]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(position.title) 선수 선택").font(.headline)
+            if available.isEmpty {
+                Text("교체할 \(position.title) 카드가 없어요").foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(available) { candidate in
+                            Button("\(candidate.name) · \(candidate.tier.title)") {
+                                if model.perform({ try $0.assign(cardID: candidate.id, to: position) }) {
+                                    selectedPosition = nil
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }.frame(height: min(CGFloat(available.count) * 30, 180))
+            }
+            if card != nil {
+                Divider()
+                Button("선수단에서 제외") {
+                    if model.perform({ try $0.remove(from: position) }) { selectedPosition = nil }
+                }
+            }
+        }.padding(16).frame(width: 250, alignment: .leading)
     }
 
     private func rosterRow(_ position: FieldPosition) -> some View {

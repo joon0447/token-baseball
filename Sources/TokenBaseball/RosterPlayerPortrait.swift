@@ -9,22 +9,14 @@ struct RosterPlayerPortrait: View {
 
     var body: some View {
         Group {
-            if let data = card.photoData, let image = NSImage(data: data) {
+            if let image = RosterPortraitAssets.thumbnail(card: card, index: portraitIndex, size: size) {
                 Image(nsImage: image).resizable().scaledToFill()
-            } else if let image = RosterPortraitAssets.image {
-                Image(nsImage: image)
-                    .resizable().interpolation(.high)
-                    .frame(width: size * 3, height: size * 3)
-                    .offset(x: -CGFloat(portraitIndex % 3) * size,
-                            y: -CGFloat(portraitIndex / 3) * size)
-                    .frame(width: size, height: size, alignment: .topLeading)
-                    .clipped()
             } else {
                 Color.secondary.opacity(0.12)
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: min(8, size / 4)))
         .accessibilityHidden(true)
     }
 
@@ -61,9 +53,7 @@ struct RosterFieldCard: View {
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 4)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.16)))
-        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(Rectangle())
     }
 }
 
@@ -78,6 +68,38 @@ private enum RosterPortraitAssets {
         return .module
     }()
 
-    static let image: NSImage? = bundle.url(forResource: "player-portraits", withExtension: "png")
-        .flatMap { NSImage(contentsOf: $0) }
+    private static let atlas: CGImage? = bundle.url(forResource: "player-portraits", withExtension: "png")
+        .flatMap { NSImage(contentsOf: $0)?.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+    private static var defaultThumbnails: [String: NSImage] = [:]
+
+    static func thumbnail(card: PlayerCard, index: Int, size: CGFloat) -> NSImage? {
+        guard size > 0 else { return nil }
+        let pixels = max(1, Int(ceil(size * 2)))
+        let key = "\(index)-\(size)"
+        let source: CGImage
+        if let data = card.photoData,
+           let image = NSImage(data: data)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let side = min(image.width, image.height)
+            let crop = CGRect(x: (image.width - side) / 2, y: (image.height - side) / 2, width: side, height: side)
+            guard let square = image.cropping(to: crop) else { return nil }
+            source = square
+        } else {
+            if let cached = defaultThumbnails[key] { return cached }
+            guard let atlas else { return nil }
+            let side = min(atlas.width, atlas.height) / 3
+            let crop = CGRect(x: index % 3 * side, y: index / 3 * side, width: side, height: side)
+            guard let face = atlas.cropping(to: crop) else { return nil }
+            source = face
+        }
+        // Use a real thumbnail with bounded intrinsic dimensions, never a clipped full-size atlas.
+        guard let context = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(source, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
+        guard let bitmap = context.makeImage() else { return nil }
+        let thumbnail = NSImage(cgImage: bitmap, size: NSSize(width: size, height: size))
+        if card.photoData == nil { defaultThumbnails[key] = thumbnail }
+        return thumbnail
+    }
 }
