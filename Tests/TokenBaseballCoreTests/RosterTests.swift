@@ -3,26 +3,26 @@ import XCTest
 @testable import TokenBaseballCore
 
 final class RosterTests: XCTestCase {
-    func testAssignmentPreventsReuseAndRemovalKeepsOwnedCard() throws {
+    func testPositionIsLockedAndReplacementRetainsInventory() throws {
         let disk = MemoryPersistence()
-        let store = try GameStore(persistence: disk)
-        _ = try store.importUsage([.init(sourceID: "codex:s", totalTokens: 30_000)])
-        let first = try store.purchase(offerID: Catalog.offers[0].id)
-        let second = try store.purchase(offerID: Catalog.offers[1].id)
-        try store.assign(cardID: first, to: .pitcher)
-        try store.assign(cardID: first, to: .pitcher)
-        XCTAssertThrowsError(try store.assign(cardID: first, to: .catcher)) {
-            XCTAssertEqual($0 as? GameError, .cardAlreadyAssigned)
+        let store = try GameStore(persistence: disk, randomIndex: { _ in 0 })
+        let starter = try XCTUnwrap(store.state.cards.first { $0.position == .pitcher })
+        XCTAssertThrowsError(try store.assign(cardID: starter.id, to: .catcher)) {
+            XCTAssertEqual($0 as? GameError, .positionMismatch)
         }
-        try store.assign(cardID: second, to: .pitcher)
-        XCTAssertEqual(store.state.lineup[FieldPosition.pitcher.rawValue], second)
-        XCTAssertEqual(store.state.cards.count, 2)
+        _ = try store.importUsage([.init(sourceID: "s", totalTokens: 50_000_000)])
+        let drawn = try store.openDraw()
+        try store.assign(cardID: drawn, to: .pitcher)
+        XCTAssertEqual(store.state.lineup["pitcher"], drawn)
+        XCTAssertTrue(store.state.cards.contains { $0.id == starter.id })
+        XCTAssertEqual(store.state.cards.count, 10)
+        try store.assign(cardID: starter.id, to: .pitcher)
+        XCTAssertTrue(store.state.cards.contains { $0.id == drawn })
         try store.remove(from: .pitcher)
-        XCTAssertTrue(store.state.lineup.isEmpty)
-        XCTAssertEqual(store.state.cards.count, 2)
-        XCTAssertEqual(store.state.balance, 10)
-        try store.assign(cardID: first, to: .rightField)
-        XCTAssertEqual(try GameStore(persistence: disk).state.lineup[FieldPosition.rightField.rawValue], first)
+        XCTAssertNil(store.state.lineup["pitcher"])
+        XCTAssertEqual(store.state.cards.count, 10)
+        try store.assign(cardID: starter.id, to: .pitcher)
+        XCTAssertEqual(try GameStore(persistence: disk).state.lineup["pitcher"], starter.id)
         XCTAssertThrowsError(try store.assign(cardID: UUID(), to: .pitcher)) {
             XCTAssertEqual($0 as? GameError, .cardNotFound)
         }
@@ -31,11 +31,9 @@ final class RosterTests: XCTestCase {
     func testFailedSaveKeepsLineupUnchanged() throws {
         let disk = MemoryPersistence()
         let store = try GameStore(persistence: disk)
-        _ = try store.importUsage([.init(sourceID: "codex:s", totalTokens: 10_000)])
-        let cardID = try store.purchase(offerID: Catalog.offers[0].id)
         let before = store.state
         disk.shouldFail = true
-        XCTAssertThrowsError(try store.assign(cardID: cardID, to: .pitcher))
+        XCTAssertThrowsError(try store.remove(from: .pitcher))
         XCTAssertEqual(store.state, before)
     }
 }

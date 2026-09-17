@@ -14,11 +14,11 @@ struct CollectionView: View {
             TierFilter(selection: $tier).padding(.horizontal, 32)
             if cards.isEmpty {
                 ContentUnavailableView {
-                    Label(model.state.cards.isEmpty ? "아직 영입한 선수가 없어요" : "이 등급의 카드가 없어요", systemImage: "rectangle.stack")
+                    Label(model.state.cards.isEmpty ? "아직 보유한 선수가 없어요" : "이 등급의 카드가 없어요", systemImage: "rectangle.stack")
                 } description: {
-                    Text(model.state.cards.isEmpty ? "카드 상점에서 첫 선수를 영입해 보세요." : "다른 등급을 선택하거나 상점을 확인해 보세요.")
+                    Text(model.state.cards.isEmpty ? "토큰을 사용해 뽑기 카드를 받아 보세요." : "다른 등급을 선택하거나 선수 뽑기를 확인해 보세요.")
                 } actions: {
-                    Button("카드 상점 열기") { navigate(.shop) }
+                    Button("선수 뽑기") { navigate(.draw) }
                 }
             } else {
                 List(cards) { card in

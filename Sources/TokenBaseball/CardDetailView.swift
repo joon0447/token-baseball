@@ -9,14 +9,12 @@ struct CardDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let initialCard: PlayerCard
     @State private var editedName: String
-    @State private var position: FieldPosition
     @State private var pendingPhoto: Data?
     @State private var localMessage: String?
 
     init(initialCard: PlayerCard) {
         self.initialCard = initialCard
         _editedName = State(initialValue: initialCard.name)
-        _position = State(initialValue: initialCard.position)
     }
     private var card: PlayerCard { model.card(initialCard.id) ?? initialCard }
     var body: some View {
@@ -79,16 +77,14 @@ struct CardDetailView: View {
                     }
                 }
                 Divider().padding(.vertical, 6)
-                Picker("배치할 포지션", selection: $position) {
-                    ForEach(FieldPosition.allCases) { Text($0.title).tag($0) }
-                }
+                LabeledContent("고정 포지션") { Label(card.position.title, systemImage: "lock.fill") }
                 HStack {
-                    Text("기존 선수가 있으면 교체됩니다.").font(.caption).foregroundStyle(.secondary)
+                    Text("같은 포지션의 기존 선수와 교체됩니다.").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("선수단에 배치") {
+                    Button("\(card.position.title)에 배치") {
                         localMessage = nil
-                        if model.perform({ try $0.assign(cardID: card.id, to: position) }) {
-                            localMessage = "\(position.title)에 배치했어요."
+                        if model.perform({ try $0.assign(cardID: card.id, to: card.position) }) {
+                            localMessage = "\(card.position.title)에 배치했어요."
                         }
                     }
                 }

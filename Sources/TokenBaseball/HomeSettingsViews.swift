@@ -7,59 +7,59 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                PageHeading(title: "내 야구단", subtitle: "AI와 쌓은 기록이 새로운 선수로 이어져요.")
-                HStack(spacing: 40) {
-                    metric("보유 재화", value: "\(model.state.balance.formatted())볼")
-                    metric("인정 토큰", value: model.state.totalTokens.formatted())
-                    metric("선수단", value: "\(model.state.lineup.count) / 9")
+                PageHeading(title: "내 야구단", subtitle: "AI와 쌓은 기록으로 새로운 선수를 만나세요.")
+                HStack(spacing: 36) {
+                    metric("오늘 사용", value: TokenDisplay.short(model.todayTokens), exact: model.todayTokens)
+                    metric("누적 토큰", value: TokenDisplay.short(model.state.totalTokens), exact: model.state.totalTokens)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("뽑기 카드").foregroundStyle(.secondary)
+                        Text("\(model.state.availableDraws.formatted())장").font(.system(size: 28, weight: .semibold)).monospacedDigit()
+                    }
                 }.padding(.vertical, 12)
-                Divider()
+                GroupBox("다음 뽑기 카드까지") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        let remaining = DrawPolicy.tokensPerDraw - model.state.totalTokens % DrawPolicy.tokensPerDraw
+                        HStack {
+                            Text("\(TokenDisplay.short(remaining)) 토큰 남음").font(.headline)
+                            Spacer()
+                            Text("\(TokenDisplay.short(DrawPolicy.tokensPerDraw)) 토큰마다 1장").foregroundStyle(.secondary)
+                        }
+                        ProgressView(value: Double(model.state.totalTokens % DrawPolicy.tokensPerDraw), total: Double(DrawPolicy.tokensPerDraw))
+                            .accessibilityLabel("다음 뽑기 카드 진행도")
+                        Button("선수 뽑기") { navigate(.draw) }.buttonStyle(.borderedProminent)
+                    }.padding(12)
+                }
                 if model.state.importFolders.isEmpty {
-                    ContentUnavailableView {
-                        Label("첫 사용 기록을 연결해 주세요", systemImage: "link")
-                    } description: {
-                        Text("Codex와 Claude Code의 기록을 반영하면 선수 영입에 쓸 볼을 받을 수 있어요.")
-                    } actions: {
-                        Button("사용 기록 연결") { navigate(.settings) }.buttonStyle(.borderedProminent)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("루키 선수 9명이 준비됐어요.").font(.headline)
+                        Text("Codex와 Claude Code의 기록을 연결하면 토큰을 집계하고 뽑기 카드를 받을 수 있어요.").foregroundStyle(.secondary)
+                        Button("사용 기록 연결") { navigate(.settings) }
                     }
                 } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label("사용 기록", systemImage: "chart.bar") .font(.headline)
-                        HStack {
-                            Button(action: model.refreshUsage) {
-                                Label(model.isImporting ? "반영 중…" : "사용량 반영", systemImage: "arrow.clockwise")
-                            }.disabled(model.isImporting)
-                            if model.isImporting {
-                                ProgressView().controlSize(.small)
-                                Button("취소", action: model.cancelImport)
-                            }
-                            if let date = model.state.lastImport {
-                                Text("마지막 반영: \(date.formatted(date: .abbreviated, time: .shortened))")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
+                    HStack {
+                        Button(action: model.refreshUsage) { Label("사용량 반영", systemImage: "arrow.clockwise") }
+                            .disabled(model.isImporting)
+                        if model.isImporting { ProgressView().controlSize(.small); Button("취소", action: model.cancelImport) }
+                        if let date = model.state.lastImport {
+                            Text("마지막 반영: \(date.formatted(date: .omitted, time: .shortened))").font(.caption).foregroundStyle(.secondary)
                         }
-                        if let message = model.importMessage { Text(message).font(.callout).foregroundStyle(.secondary) }
                     }
+                    if let message = model.importMessage { Text(message).font(.callout).foregroundStyle(.secondary) }
                 }
-                HStack(spacing: 14) {
-                    Button("카드 상점 열기") { navigate(.shop) }
-                    Button("선수단 구성하기") { navigate(.roster) }
-                }
-                GroupBox("구단 기록") {
-                    VStack(spacing: 12) {
-                        LabeledContent("보유 선수", value: "\(model.state.cards.count)명")
-                        LabeledContent("누적 획득 재화", value: "\(model.state.earnedCurrency.formatted())볼")
-                        LabeledContent("사용한 재화", value: "\(model.state.spentCurrency.formatted())볼")
-                        LabeledContent("다음 1볼까지", value: "\((1_000 - model.state.totalTokens % 1_000).formatted())토큰")
-                    }.padding(12)
+                Divider()
+                HStack {
+                    Text("보유 선수 \(model.state.cards.count)명 · 선수단 \(model.state.lineup.count)/9").font(.headline)
+                    Spacer()
+                    Button("선수단 보기") { navigate(.roster) }
                 }
             }.padding(32).frame(maxWidth: 960, alignment: .leading)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
-    private func metric(_ title: String, value: String) -> some View {
+    private func metric(_ title: String, value: String, exact: Int64) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).foregroundStyle(.secondary)
             Text(value).font(.system(size: 28, weight: .semibold)).monospacedDigit()
+                .help("\(exact.formatted()) 토큰").accessibilityLabel("\(title) \(exact.formatted()) 토큰")
         }
     }
 }
@@ -68,31 +68,31 @@ struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     var body: some View {
         Form {
-            Section {
-                Text("Codex와 Claude Code의 로컬 사용 기록을 연결해 주세요. 연결 후 ‘사용량 반영’을 누르면 과거 기록을 포함해 집계합니다.")
+            Section("사용 기록 연결") {
+                Text("연결된 기록은 앱이 실행 중일 때 1분마다 갱신합니다. 오늘 사용량은 Mac의 날짜 기준이며, 과거 기록은 해당 날짜에 집계합니다.")
                     .foregroundStyle(.secondary)
                 sourceRow("Codex", source: "codex", hint: "~/.codex 또는 sessions 폴더")
                 sourceRow("Claude Code", source: "claude", hint: "~/.claude 또는 projects 폴더")
-            } header: { Text("사용 기록 연결") }
-            Section("반영") {
+            }
+            Section("사용량") {
+                LabeledContent("오늘 사용한 토큰", value: "\(TokenDisplay.short(model.todayTokens)) (\(model.todayTokens.formatted()))")
+                LabeledContent("누적 토큰", value: TokenDisplay.short(model.state.totalTokens))
                 HStack {
-                    Button(action: model.refreshUsage) {
-                        Label(model.isImporting ? "사용 기록을 읽고 있어요…" : "사용량 반영", systemImage: "arrow.clockwise")
-                    }.disabled(model.isImporting || model.state.importFolders.isEmpty)
-                    if model.isImporting {
-                        ProgressView().controlSize(.small)
-                        Button("취소", action: model.cancelImport)
-                    }
+                    Button(action: model.refreshUsage) { Label("사용량 반영", systemImage: "arrow.clockwise") }
+                        .disabled(model.isImporting || model.state.importFolders.isEmpty)
+                    if model.isImporting { ProgressView().controlSize(.small); Button("취소", action: model.cancelImport) }
                 }
                 if let message = model.importMessage { Text(message).foregroundStyle(.secondary) }
-                Text("기록 식별값과 토큰 수치를 저장합니다. 대화 본문은 앱에 보관하거나 전송하지 않습니다. 이미 반영한 기록에는 재화를 다시 지급하지 않습니다.")
+                Text("상태바에서도 오늘 사용량을 확인할 수 있어요. 대화 본문은 저장하거나 전송하지 않습니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("초기 운영 규칙") {
-                LabeledContent("재화 환산", value: "1,000토큰 = 1볼 · 나머지는 다음 지급에 합산")
-                LabeledContent("카드 가격", value: "루키 10볼 / 올스타 30볼 / 레전드 100볼")
-                LabeledContent("구매 방식", value: "카드 직접 구매 · 같은 카드 중복 구매 불가")
-                Text("개발용 초기값이며 최종 정책이 정해지면 변경될 수 있어요.").font(.caption).foregroundStyle(.secondary)
+            Section("선수와 뽑기 규칙") {
+                LabeledContent("기본 선수", value: "포지션별 루키 9명 · 무작위 이름")
+                LabeledContent("뽑기 카드", value: "\(TokenDisplay.short(DrawPolicy.tokensPerDraw)) 토큰마다 1장")
+                LabeledContent("등급 확률", value: "루키 75% / 올스타 20% / 레전드 5%")
+                LabeledContent("선수 포지션", value: "획득 시 무작위 결정 · 변경 불가")
+                Text("뽑기는 누적 토큰을 차감하지 않습니다. 선수는 자신의 포지션에만 배치할 수 있어요.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("데이터 저장") {
                 Text(model.saveURL.path).font(.caption).textSelection(.enabled)

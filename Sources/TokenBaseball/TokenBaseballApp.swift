@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TokenBaseballCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -13,7 +14,7 @@ struct TokenBaseballApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
     var body: some Scene {
-        WindowGroup("TokenBaseball") {
+        WindowGroup("TokenBaseball", id: "main") {
             ContentView().environmentObject(model).frame(minWidth: 880, minHeight: 620)
         }
         .defaultSize(width: 1100, height: 760)
@@ -28,12 +29,12 @@ struct TokenBaseballApp: App {
 }
 
 enum AppPage: String, CaseIterable, Identifiable {
-    case home = "홈", shop = "카드 상점", collection = "보유 카드", roster = "내 선수단", settings = "설정"
+    case home = "홈", draw = "선수 뽑기", collection = "보유 카드", roster = "내 선수단", settings = "설정"
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .home: "house"
-        case .shop: "cart"
+        case .draw: "rectangle.stack.badge.plus"
         case .collection: "rectangle.stack"
         case .roster: "baseball.diamond.bases"
         case .settings: "gearshape"
@@ -79,7 +80,7 @@ struct ContentView: View {
             Group {
                 switch page ?? .home {
                 case .home: HomeView { page = $0 }
-                case .shop: ShopView()
+                case .draw: DrawView()
                 case .collection: CollectionView { page = $0 }
                 case .roster: RosterView { page = $0 }
                 case .settings: SettingsView()
@@ -88,8 +89,8 @@ struct ContentView: View {
             .navigationTitle((page ?? .home).rawValue)
             .toolbar {
                 ToolbarItem {
-                    Text("\(model.state.balance.formatted())볼").monospacedDigit()
-                        .accessibilityLabel("보유 재화 \(model.state.balance)볼")
+                    Text("\(TokenDisplay.short(model.state.totalTokens)) 토큰").monospacedDigit()
+                        .accessibilityLabel("누적 사용량 \(model.state.totalTokens.formatted()) 토큰")
                 }
             }
         }

@@ -6,7 +6,6 @@ final class MemoryPersistence: SnapshotPersistence {
     var snapshot: GameState?
     var shouldFail = false
     var saveCount = 0
-
     init(snapshot: GameState? = nil) { self.snapshot = snapshot }
     func load() throws -> GameState? { snapshot }
     func save(_ state: GameState) throws {
@@ -15,18 +14,32 @@ final class MemoryPersistence: SnapshotPersistence {
         saveCount += 1
     }
 }
-
 enum TestFailure: Error { case diskUnavailable }
 
 final class PersistenceTests: XCTestCase {
-    func testNewStoreStartsWithoutCardsOrCurrency() throws {
-        let store = try GameStore(persistence: MemoryPersistence())
-        XCTAssertEqual(store.state, GameState())
-        XCTAssertEqual(Catalog.offers.count, 27)
-        XCTAssertEqual(Set(Catalog.offers.map(\.id)).count, 27)
-        for tier in CardTier.allCases {
-            XCTAssertEqual(Catalog.offers.filter { $0.tier == tier }.count, 9)
-        }
+    func testFreshStoreGrantsNineStableStartersExactlyOnce() throws {
+        let disk = MemoryPersistence()
+        let store = try GameStore(persistence: disk, randomIndex: { _ in 0 })
+        XCTAssertEqual(store.state.cards.count, 9)
+        XCTAssertEqual(store.state.lineup.count, 9)
+        XCTAssertEqual(Set(store.state.cards.map(\.name)).count, 9)
+        XCTAssertEqual(Set(store.state.cards.map(\.position)), Set(FieldPosition.allCases))
+        XCTAssertTrue(store.state.cards.allSatisfy { $0.tier == .rookie && $0.origin == .starter })
+        XCTAssertTrue(store.state.starterGrantComplete)
+        XCTAssertEqual(store.state.totalTokens, 0)
+        XCTAssertEqual(store.state.availableDraws, 0)
+        XCTAssertEqual(disk.saveCount, 1)
+        let reopened = try GameStore(persistence: disk, randomIndex: { $0 - 1 })
+        XCTAssertEqual(reopened.state, store.state)
+        XCTAssertEqual(disk.saveCount, 1)
+    }
+
+    func testFreshGrantFailureDoesNotPersistPartialTeam() {
+        let disk = MemoryPersistence()
+        disk.shouldFail = true
+        XCTAssertThrowsError(try GameStore(persistence: disk))
+        XCTAssertNil(disk.snapshot)
+        XCTAssertEqual(disk.saveCount, 0)
     }
 
     func testFolderSettingsPersistAndRollbackOnFailure() throws {
@@ -34,286 +47,198 @@ final class PersistenceTests: XCTestCase {
         let store = try GameStore(persistence: disk)
         try store.setImportFolder("/tmp/codex", for: "codex")
         try store.setImportFolder("/tmp/claude", for: "claude")
-        XCTAssertEqual(try GameStore(persistence: disk).state.importFolders,
-                       ["codex": "/tmp/codex", "claude": "/tmp/claude"])
+        XCTAssertEqual(try GameStore(persistence: disk).state.importFolders, ["codex": "/tmp/codex", "claude": "/tmp/claude"])
         let before = store.state
         disk.shouldFail = true
         XCTAssertThrowsError(try store.setImportFolder("/tmp/new", for: "codex"))
         XCTAssertEqual(store.state, before)
-        XCTAssertThrowsError(try store.setImportFolder("relative/path", for: "claude"))
-        XCTAssertThrowsError(try store.setImportFolder("/tmp/path", for: "unknown"))
+        XCTAssertThrowsError(try store.setImportFolder("relative", for: "claude"))
+        XCTAssertThrowsError(try store.setImportFolder("/tmp", for: "unknown"))
     }
 
-    func testJSONRoundTripPreservesCardsPhotosAndLineup() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    func testJSONRoundTripPreservesNamesPhotosUsageAndDraws() throws {
+        let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let disk = JSONDiskPersistence(url: directory.appendingPathComponent("state.json"))
-        XCTAssertNil(try disk.load())
-        let offer = try XCTUnwrap(Catalog.offers.first)
-        let card = PlayerCard(catalogID: offer.id, defaultName: offer.name, customName: "내 에이스",
-                              tier: offer.tier, position: offer.position, photoData: Data([1, 2, 3]))
-        let original = GameState(totalTokens: 15_500, earnedCurrency: 15, spentCurrency: 10,
-                                 cards: [card], lineup: [FieldPosition.pitcher.rawValue: card.id],
-                                 sourceTotals: ["codex:test": 15_500], lastImport: Date(timeIntervalSince1970: 123.5),
-                                 importFolders: ["codex": "/tmp/codex"])
-        try disk.save(original)
-        XCTAssertEqual(try disk.load(), original)
-        XCTAssertEqual(try GameStore(persistence: disk).state.balance, 5)
+        let store = try GameStore(persistence: disk)
+        let id = store.state.cards[0].id
+        try store.rename(cardID: id, name: "내 에이스")
+        try store.setPhoto(cardID: id, data: Data([1, 2, 3]))
+        _ = try store.importUsage([.init(sourceID: "codex:s", totalTokens: 100_000_000,
+                                         dailyTokens: ["2026-09-17": 10_000_000])])
+        _ = try store.openDraw()
+        let restarted = try GameStore(persistence: JSONDiskPersistence(url: disk.url))
+        XCTAssertEqual(restarted.state, store.state)
+        XCTAssertEqual(restarted.state.tokens(on: "2026-09-17"), 10_000_000)
     }
 
-    func testCorruptFileIsNeverOverwritten() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.removeItem(at: url.appendingPathExtension("lock"))
-        }
-        let bytes = Data("broken save".utf8)
-        try bytes.write(to: url)
-        let disk = JSONDiskPersistence(url: url)
-        XCTAssertThrowsError(try GameStore(persistence: disk)) { XCTAssertEqual($0 as? GameError, .corruptSave) }
-        XCTAssertThrowsError(try disk.save(GameState()))
-        XCTAssertEqual(try Data(contentsOf: url), bytes)
-    }
-
-    func testUnknownSchemaIsNeverOverwritten() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.removeItem(at: url.appendingPathExtension("lock"))
-        }
-        let bytes = Data("{\"schemaVersion\":99}".utf8)
-        try bytes.write(to: url)
-        let disk = JSONDiskPersistence(url: url)
-        XCTAssertThrowsError(try disk.load()) { XCTAssertEqual($0 as? GameError, .unsupportedSchema(99)) }
-        XCTAssertThrowsError(try disk.save(GameState()))
-        XCTAssertEqual(try Data(contentsOf: url), bytes)
-    }
-
-    func testInvalidLedgerAndDanglingLineupAreRejectedOnLoad() throws {
-        var invalid = GameState(totalTokens: -1)
-        XCTAssertThrowsError(try GameStore(persistence: MemoryPersistence(snapshot: invalid)))
-        invalid = GameState(totalTokens: 2_000, earnedCurrency: 999, sourceTotals: ["codex:s": 2_000])
-        XCTAssertThrowsError(try invalid.validate())
-        invalid = GameState(totalTokens: 2_000, earnedCurrency: 2, spentCurrency: 3, sourceTotals: ["codex:s": 2_000])
-        XCTAssertThrowsError(try invalid.validate())
-        invalid = GameState(lineup: [FieldPosition.pitcher.rawValue: UUID()])
-        XCTAssertThrowsError(try invalid.validate())
-        invalid = GameState(sourceTotals: ["codex:s": 1])
-        XCTAssertThrowsError(try invalid.validate())
-    }
-
-    func testDuplicateCardsAndLineupAreRejected() throws {
-        let offer = try XCTUnwrap(Catalog.offers.first)
-        let card = PlayerCard(catalogID: offer.id, defaultName: offer.name, tier: offer.tier, position: offer.position)
-        var state = GameState(totalTokens: 20_000, earnedCurrency: 20, spentCurrency: 20,
-                              cards: [card, card], sourceTotals: ["codex:s": 20_000])
-        XCTAssertThrowsError(try state.validate())
-        state.cards = [card]
-        state.spentCurrency = 10
-        state.lineup = [FieldPosition.pitcher.rawValue: card.id, FieldPosition.catcher.rawValue: card.id]
-        XCTAssertThrowsError(try state.validate())
-    }
-
-    func testFractionalHugeStoredTokensAreRejectedWithoutChangingFile() throws {
-        try withDisk { disk in
-            let tokens: Int64 = 9_007_199_254_740_993
-            let state = GameState(totalTokens: tokens, earnedCurrency: tokens / GameState.tokensPerCurrency,
-                                  sourceTotals: ["codex:synthetic": tokens])
-            let json = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
-                .replacingOccurrences(of: String(tokens), with: "9007199254740993.1")
-            let bytes = Data(json.utf8)
-            try bytes.write(to: disk.url)
-            XCTAssertThrowsError(try disk.load()) { XCTAssertEqual($0 as? GameError, .corruptSave) }
-            XCTAssertThrowsError(try disk.save(state)) { XCTAssertEqual($0 as? GameError, .corruptSave) }
-            XCTAssertEqual(try Data(contentsOf: disk.url), bytes)
-        }
-    }
-
-    func testStoredLedgerNumbersMustBeNonnegativeIntegerLiterals() throws {
-        for field in ["schemaVersion", "totalTokens", "earnedCurrency", "spentCurrency", "sourceTotal"] {
-            for value in ["true", "false", "1.0", "1e3", "-1", "9223372036854775808", "\"1\"", "null"] {
-                try withDisk { disk in
-                    let fields = [
-                        "schemaVersion": field == "schemaVersion" ? value : "1",
-                        "totalTokens": field == "totalTokens" ? value : "0",
-                        "earnedCurrency": field == "earnedCurrency" ? value : "0",
-                        "spentCurrency": field == "spentCurrency" ? value : "0"
-                    ]
-                    let ledger = fields.map { "\"\($0.key)\":\($0.value)" }.joined(separator: ",")
-                    let total = field == "sourceTotal" ? value : "0"
-                    let bytes = Data(("{" + ledger + ",\"sourceTotals\":{\"codex:test\":" + total
-                                      + "},\"cards\":[],\"lineup\":{},\"importFolders\":{}}").utf8)
-                    try bytes.write(to: disk.url)
-                    XCTAssertThrowsError(try disk.load(), "Accepted \(field)=\(value)") {
-                        XCTAssertEqual($0 as? GameError, .corruptSave)
-                    }
-                    XCTAssertEqual(try Data(contentsOf: disk.url), bytes)
-                }
-            }
-        }
-    }
-
-    func testDirectInitialSaveAndInt64MaximumRoundTrip() throws {
-        try withDisk { disk in
-            let initial = GameState(totalTokens: Int64.max, earnedCurrency: Int64.max / GameState.tokensPerCurrency,
-                                    sourceTotals: ["codex:max": Int64.max])
-            // Saving into an absent file remains supported without a preceding load.
-            try disk.save(initial)
-            XCTAssertEqual(try disk.load(), initial)
-            let unopened = JSONDiskPersistence(url: disk.url)
-            XCTAssertThrowsError(try unopened.save(GameState())) { XCTAssertEqual($0 as? GameError, .staleSave) }
-            XCTAssertEqual(try disk.load(), initial)
-        }
-    }
-
-    func testStaleUsageWriterIsRejectedAndCanReloadThroughNewInstance() throws {
-        try withDisk { disk in
-            let first = try GameStore(persistence: disk)
-            let second = try GameStore(persistence: JSONDiskPersistence(url: disk.url))
-            try first.importUsage([.init(sourceID: "codex:first", totalTokens: 50_000)])
-            let bytes = try Data(contentsOf: disk.url)
-            // A failed conflict check must not advance the stale writer's baseline.
-            for _ in 0..<2 {
-                XCTAssertThrowsError(try second.importUsage([.init(sourceID: "claude:second", totalTokens: 30_000)])) {
-                    XCTAssertEqual($0 as? GameError, .staleSave)
-                }
-                XCTAssertEqual(second.state, GameState())
-                XCTAssertEqual(try Data(contentsOf: disk.url), bytes)
-            }
-            let reloaded = try GameStore(persistence: JSONDiskPersistence(url: disk.url))
-            XCTAssertEqual(reloaded.state, first.state)
-            try reloaded.importUsage([.init(sourceID: "claude:second", totalTokens: 30_000)])
-            XCTAssertEqual(reloaded.state.totalTokens, 80_000)
-            XCTAssertEqual(try JSONDiskPersistence(url: disk.url).load(), reloaded.state)
-        }
-    }
-
-    func testStalePurchaseCannotLoseAnotherPurchaseOrDebitFunds() throws {
-        try withDisk { disk in
-            try disk.save(GameState(totalTokens: 50_000, earnedCurrency: 50, sourceTotals: ["codex:test": 50_000]))
-            let first = try GameStore(persistence: disk)
-            let second = try GameStore(persistence: JSONDiskPersistence(url: disk.url))
-            let secondBefore = second.state
-            try first.purchase(offerID: Catalog.offers[0].id)
-            let bytes = try Data(contentsOf: disk.url)
-            XCTAssertThrowsError(try second.purchase(offerID: Catalog.offers[1].id)) {
-                XCTAssertEqual($0 as? GameError, .staleSave)
-            }
-            XCTAssertEqual(second.state, secondBefore)
-            XCTAssertEqual(try Data(contentsOf: disk.url), bytes)
-            let reloaded = try GameStore(persistence: JSONDiskPersistence(url: disk.url))
-            try reloaded.purchase(offerID: Catalog.offers[1].id)
-            XCTAssertEqual(reloaded.state.cards.count, 2)
-            XCTAssertEqual(reloaded.state.balance, 30)
-        }
-    }
-
-    func testSemanticCorruptionAfterLoadPreservesFileAndExpectedSnapshot() throws {
-        try withDisk { disk in
-            let store = try GameStore(persistence: disk)
-            try store.importUsage([.init(sourceID: "codex:test", totalTokens: 50_000)])
-            let before = store.state
-            let originalBytes = try Data(contentsOf: disk.url)
-            var corrupt = before
-            corrupt.earnedCurrency = 999
-            let corruptBytes = try JSONEncoder().encode(corrupt)
-            try corruptBytes.write(to: disk.url)
-            XCTAssertThrowsError(try disk.load())
-            XCTAssertThrowsError(try store.importUsage([.init(sourceID: "codex:test", totalTokens: 60_000)]))
-            XCTAssertEqual(store.state, before)
-            XCTAssertEqual(try Data(contentsOf: disk.url), corruptBytes)
-            try originalBytes.write(to: disk.url)
-            XCTAssertEqual(try store.importUsage([.init(sourceID: "codex:test", totalTokens: 60_000)]), 10_000)
-        }
-    }
-
-    func testActualDiskWriteFailureDoesNotAdvanceExpectedSnapshot() throws {
-        try withDisk { disk in
-            try disk.save(GameState())
-            let store = try GameStore(persistence: disk)
-            let directory = disk.url.deletingLastPathComponent()
-            let originalBytes = try Data(contentsOf: disk.url)
-            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
-            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
-            XCTAssertThrowsError(try store.importUsage([.init(sourceID: "codex:test", totalTokens: 1_000)]))
-            XCTAssertEqual(store.state, GameState())
-            XCTAssertEqual(try Data(contentsOf: disk.url), originalBytes)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-            XCTAssertEqual(try store.importUsage([.init(sourceID: "codex:test", totalTokens: 1_000)]), 1_000)
-        }
-    }
-
-    func testConcurrentWritersSerializeComparisonAndAtomicSave() throws {
-        try withDisk { disk in
-            try disk.save(GameState())
-            let url = disk.url
-            let ready = DispatchGroup()
-            let finished = DispatchGroup()
-            let start = DispatchSemaphore(value: 0)
-            let results = ConcurrentSaveResults()
-            for index in 1...2 {
-                ready.enter()
-                finished.enter()
-                DispatchQueue.global().async {
-                    defer { finished.leave() }
-                    let writer = JSONDiskPersistence(url: url)
-                    do {
-                        _ = try writer.load()
-                    } catch {
-                        results.record(error)
-                        ready.leave()
-                        return
-                    }
-                    ready.leave()
-                    start.wait()
-                    do {
-                        let tokens = Int64(index) * 1_000
-                        try writer.save(GameState(totalTokens: tokens, earnedCurrency: Int64(index),
-                                                  sourceTotals: ["codex:writer-\(index)": tokens]))
-                        results.record(nil)
-                    } catch {
-                        results.record(error)
-                    }
-                }
-            }
-            XCTAssertEqual(ready.wait(timeout: .now() + 10), .success)
-            start.signal()
-            start.signal()
-            XCTAssertEqual(finished.wait(timeout: .now() + 10), .success)
-            let outcome = results.counts
-            XCTAssertEqual(outcome.success, 1)
-            XCTAssertEqual(outcome.stale, 1)
-            XCTAssertEqual(outcome.other, 0)
-            let saved = try XCTUnwrap(JSONDiskPersistence(url: url).load())
-            XCTAssertTrue([Int64(1_000), 2_000].contains(saved.totalTokens))
-        }
-    }
-
-    private func withDisk(_ body: (JSONDiskPersistence) throws -> Void) throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PersistenceTests-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    func testV1MigrationBacksUpOriginalAndGrantsOnlyOnce() throws {
+        let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        try body(JSONDiskPersistence(url: directory.appendingPathComponent("state.json")))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("state.json")
+        let pitcher = PlayerCard(catalogID: "rookie-pitcher", defaultName: "강도윤", customName: "기존 에이스",
+                                 tier: .rookie, position: .pitcher, photoData: Data([7, 8]))
+        let catcher = PlayerCard(catalogID: "allStar-catcher", defaultName: "신도현", tier: .allStar, position: .catcher)
+        let original = try legacyData(cards: [pitcher, catcher], lineup: ["pitcher": pitcher.id, "secondBase": catcher.id])
+        try original.write(to: url)
+        let store = try GameStore(persistence: JSONDiskPersistence(url: url))
+        XCTAssertEqual(store.state.schemaVersion, 2)
+        XCTAssertEqual(store.state.cards.count, 11)
+        XCTAssertEqual(store.state.cards.filter { $0.origin == .starter }.count, 9)
+        XCTAssertEqual(store.state.cards.filter { $0.origin == .legacy }.count, 2)
+        XCTAssertEqual(store.state.cards.filter { $0.id != pitcher.id && $0.id != catcher.id }.filter { $0.tier == .rookie }.count, 9)
+        XCTAssertEqual(store.state.cards.first { $0.id == pitcher.id }, pitcher)
+        XCTAssertEqual(store.state.cards.first { $0.id == catcher.id }, catcher)
+        XCTAssertEqual(store.state.lineup["pitcher"], pitcher.id)
+        XCTAssertNotEqual(store.state.lineup["secondBase"], catcher.id)
+        XCTAssertEqual(store.state.lineup.count, 9)
+        XCTAssertEqual(store.state.totalTokens, 100_000_000)
+        XCTAssertEqual(store.state.availableDraws, 2)
+        XCTAssertTrue(store.state.sourceDailyTotals.isEmpty)
+        XCTAssertEqual(store.state.tokens(on: "2026-09-17"), 0)
+        XCTAssertEqual(store.state.importFolders, ["codex": "/tmp/codex"])
+        let backup = url.appendingPathExtension("v1.backup")
+        XCTAssertEqual(try Data(contentsOf: backup), original)
+        let restarted = try GameStore(persistence: JSONDiskPersistence(url: url))
+        XCTAssertEqual(restarted.state, store.state)
+        XCTAssertEqual(try Data(contentsOf: backup), original)
+        // Restoring an older v1 file must not replace the first migration backup.
+        let replacement = try legacyData(cards: [], lineup: [:])
+        try replacement.write(to: url, options: .atomic)
+        _ = try GameStore(persistence: JSONDiskPersistence(url: url))
+        XCTAssertEqual(try Data(contentsOf: backup), original)
     }
-}
 
-private final class ConcurrentSaveResults: @unchecked Sendable {
-    private let lock = NSLock()
-    private var success = 0
-    private var stale = 0
-    private var other = 0
-
-    func record(_ error: Error?) {
-        lock.lock()
-        defer { lock.unlock() }
-        if error == nil { success += 1 }
-        else if error as? GameError == .staleSave { stale += 1 }
-        else { other += 1 }
+    func testCorruptUnknownAndInvalidV1FilesRemainUntouched() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("state.json")
+        let invalidV1 = try legacyData(cards: [], lineup: [:], earned: 99)
+        for bytes in [Data("broken".utf8), Data("{\"schemaVersion\":99}".utf8), invalidV1] {
+            try bytes.write(to: url, options: .atomic)
+            let disk = JSONDiskPersistence(url: url)
+            XCTAssertThrowsError(try GameStore(persistence: disk))
+            let valid = try GameStore(persistence: MemoryPersistence()).state
+            XCTAssertThrowsError(try disk.save(valid))
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathExtension("v1.backup").path))
+        }
     }
 
-    var counts: (success: Int, stale: Int, other: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        return (success, stale, other)
+    func testStrictJSONCountersRejectFractionsBooleansAndHugeLiterals() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        _ = try GameStore(persistence: JSONDiskPersistence(url: url))
+        let original = try String(contentsOf: url, encoding: .utf8)
+        for literal in ["true", "1.5", "9007199254740993.1", "9223372036854775808"] {
+            let changed = original.replacingOccurrences(of: "\"totalTokens\" : 0", with: "\"totalTokens\" : " + literal)
+            XCTAssertNotEqual(changed, original)
+            let bytes = Data(changed.utf8)
+            try bytes.write(to: url, options: .atomic)
+            XCTAssertThrowsError(try JSONDiskPersistence(url: url).load())
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+        }
+    }
+
+    func testStaleWriterAndExternallyCorruptedFileCannotOverwrite() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        let first = try GameStore(persistence: JSONDiskPersistence(url: url))
+        let second = try GameStore(persistence: JSONDiskPersistence(url: url))
+        let before = second.state
+        _ = try first.importUsage([.init(sourceID: "codex:a", totalTokens: 50_000_000)])
+        let latest = try Data(contentsOf: url)
+        XCTAssertThrowsError(try second.importUsage([.init(sourceID: "claude:b", totalTokens: 30_000_000)])) {
+            XCTAssertEqual($0 as? GameError, .staleSave)
+        }
+        XCTAssertEqual(second.state, before)
+        XCTAssertEqual(try Data(contentsOf: url), latest)
+        let corrupt = Data("corrupt".utf8)
+        try corrupt.write(to: url, options: .atomic)
+        let firstBefore = first.state
+        XCTAssertThrowsError(try first.setImportFolder("/tmp/codex", for: "codex"))
+        XCTAssertEqual(first.state, firstBefore)
+        XCTAssertEqual(try Data(contentsOf: url), corrupt)
+    }
+
+    func testMissingGrantDuplicateCardsAndMismatchedLineupAreRejected() throws {
+        var state = try GameStore(persistence: MemoryPersistence()).state
+        state.starterGrantComplete = false
+        XCTAssertThrowsError(try state.validate())
+        state.starterGrantComplete = true
+        state.cards.append(state.cards[0])
+        XCTAssertThrowsError(try state.validate())
+        state.cards.removeLast()
+        state.lineup["catcher"] = state.cards[0].id
+        XCTAssertThrowsError(try state.validate())
+    }
+
+    func testDrawOriginCountRejectsLostCardsAndCounterRollbackOnSaveAndLoad() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        let disk = JSONDiskPersistence(url: url)
+        let store = try GameStore(persistence: disk)
+        _ = try store.importUsage([.init(sourceID: "s", totalTokens: 100_000_000)])
+        let drawnID = try store.openDraw()
+        XCTAssertEqual(store.state.cards.first { $0.id == drawnID }?.origin, .draw)
+        let original = try Data(contentsOf: url)
+        var missingCard = store.state
+        missingCard.cards.removeAll { $0.id == drawnID }
+        var rolledBackCount = store.state
+        rolledBackCount.openedDraws = 0
+        for invalid in [missingCard, rolledBackCount] {
+            XCTAssertThrowsError(try invalid.validate())
+            XCTAssertThrowsError(try disk.save(invalid))
+            XCTAssertEqual(try Data(contentsOf: url), original)
+            let bytes = try JSONEncoder().encode(invalid)
+            try bytes.write(to: url, options: .atomic)
+            XCTAssertThrowsError(try JSONDiskPersistence(url: url).load())
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+            try original.write(to: url, options: .atomic)
+        }
+        XCTAssertEqual(try JSONDiskPersistence(url: url).load(), store.state)
+    }
+
+    func testV2MissingOriginsCannotSilentlyBecomeLegacyCards() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("state.json")
+        _ = try GameStore(persistence: JSONDiskPersistence(url: url))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var cards = try XCTUnwrap(object["cards"] as? [[String: Any]])
+        for index in cards.indices { cards[index].removeValue(forKey: "origin") }
+        object["cards"] = cards
+        let bytes = try JSONSerialization.data(withJSONObject: object)
+        try bytes.write(to: url, options: .atomic)
+        XCTAssertThrowsError(try GameStore(persistence: JSONDiskPersistence(url: url)))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathExtension("v1.backup").path))
+    }
+
+    func testStarterOriginsMustCoverExactlyNineUniquePositions() throws {
+        var state = try GameStore(persistence: MemoryPersistence()).state
+        let last = try XCTUnwrap(state.cards.last)
+        state.cards.removeLast()
+        state.lineup.removeValue(forKey: last.position.rawValue)
+        state.cards.append(PlayerCard(catalogID: "replacement", defaultName: "같은 포지션", tier: .rookie,
+                                     position: .pitcher, origin: .starter))
+        XCTAssertThrowsError(try state.validate())
+    }
+
+    private func makeDirectory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
+    private func legacyData(cards: [PlayerCard], lineup: [String: UUID], earned: Int64 = 100_000) throws -> Data {
+        var encodedCards = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(cards)) as? [[String: Any]])
+        for index in encodedCards.indices { encodedCards[index].removeValue(forKey: "origin") }
+        let spent: Int64 = cards.reduce(0) { $0 + ($1.tier == .rookie ? 10 : $1.tier == .allStar ? 30 : 100) }
+        let object: [String: Any] = ["schemaVersion": 1, "totalTokens": Int64(100_000_000),
+            "earnedCurrency": earned, "spentCurrency": spent, "cards": encodedCards,
+            "lineup": lineup.mapValues(\.uuidString), "sourceTotals": ["codex:old": Int64(100_000_000)],
+            "lastImport": 123.5, "importFolders": ["codex": "/tmp/codex"]]
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 }

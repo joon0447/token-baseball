@@ -10,9 +10,9 @@ struct RosterView: View {
                 PageHeading(title: "내 선수단", subtitle: "9개 수비 포지션 중 \(model.state.lineup.count)자리를 채웠어요.")
                 if model.state.cards.isEmpty {
                     HStack {
-                        Text("카드 상점에서 선수를 영입하면 여기에 배치할 수 있어요.").foregroundStyle(.secondary)
+                        Text("뽑기로 얻은 선수를 같은 포지션에 배치할 수 있어요.").foregroundStyle(.secondary)
                         Spacer()
-                        Button("카드 상점 열기") { navigate(.shop) }
+                        Button("선수 뽑기 열기") { navigate(.draw) }
                     }
                 }
                 VStack(spacing: 0) {
@@ -29,7 +29,7 @@ struct RosterView: View {
     private func rosterRow(_ position: FieldPosition) -> some View {
         let id = model.state.lineup[position.rawValue]
         let card = id.flatMap { model.card($0) }
-        let available = model.state.cards.filter { model.assignedPosition($0.id) == nil || $0.id == id }
+        let available = model.state.cards.filter { $0.position == position && model.assignedPosition($0.id) == nil && $0.id != id }
         return HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(position.abbreviation).font(.headline).monospaced()
