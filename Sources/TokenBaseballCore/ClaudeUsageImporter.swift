@@ -3,7 +3,12 @@ import Foundation
 
 /// Reads only usage metadata from Claude Code's local session transcripts.
 public struct ClaudeUsageImporter: Sendable {
-    public init() {}
+    private let calendar: Calendar
+    private let cache = UsageFileCache<[String: ClaudeMessageMetadata]>()
+
+    public init(calendar: Calendar = .autoupdatingCurrent) { self.calendar = calendar }
+
+    var parsedFileCount: Int { cache.parsedFileCount }
 
     public func read(folder: URL) throws -> [UsageSnapshot] {
         try Task.checkCancellation()
@@ -16,6 +21,7 @@ public struct ClaudeUsageImporter: Sendable {
             root = projects
         } else if folder.lastPathComponent == ".claude" {
             // A fresh Claude installation may have history/configuration but no sessions yet.
+            cache.retain(paths: [])
             return []
         } else {
             root = folder
@@ -34,30 +40,56 @@ public struct ClaudeUsageImporter: Sendable {
             throw ClaudeUsageImportError.folderUnavailable(root.path)
         }
 
-        var usageByMessage: [String: TokenUsage] = [:]
+        var usageByMessage: [String: ClaudeMessageMetadata] = [:]
+        var paths = Set<String>()
+        let timestamps = UsageTimestampParser()
         for case let file as URL in files {
             try Task.checkCancellation()
             guard file.pathExtension.lowercased() == "jsonl",
                   file.lastPathComponent != "history.jsonl" else { continue }
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
-            try readLines(file: file) { data, line, terminated in
-                guard let (id, usage) = try parse(data, file: file, line: line, terminated: terminated) else {
-                    return
+            paths.insert(file.path)
+            let signature = try UsageFileSignature(file)
+            var messages: [String: ClaudeMessageMetadata]
+            if let cached = cache.value(for: file.path, signature: signature) {
+                messages = cached
+            } else {
+                cache.recordParse()
+                messages = [:]
+                try readLines(file: file) { data, line, terminated in
+                    guard let (id, usage) = try parse(data, file: file, line: line, terminated: terminated, timestamps: timestamps) else {
+                        return
+                    }
+                    let merged = messages[id]?.merging(usage) ?? usage
+                    _ = try merged.usage.total(file: file.lastPathComponent, line: line)
+                    messages[id] = merged
                 }
+                if try UsageFileSignature(file) == signature {
+                    cache.store(messages, for: file.path, signature: signature)
+                }
+            }
+            for (id, usage) in messages {
+                try Task.checkCancellation()
                 let merged = usageByMessage[id]?.merging(usage) ?? usage
-                _ = try merged.total(file: file.lastPathComponent, line: line)
+                _ = try merged.usage.total(file: file.lastPathComponent, line: 0)
                 usageByMessage[id] = merged
             }
         }
         if traversalError != nil {
             throw ClaudeUsageImportError.folderUnavailable(root.path)
         }
-
+        cache.retain(paths: paths)
+        let calendar = usageDayCalendar(calendar)
         return try usageByMessage.keys.sorted().map { id in
-            UsageSnapshot(
+            try Task.checkCancellation()
+            let message = usageByMessage[id]!
+            let total = try message.usage.total(file: "Claude", line: 0)
+            let daily = message.timestamp.map { [usageDayKey($0, calendar: calendar): total] } ?? [:]
+            return UsageSnapshot(
                 sourceID: "claude:" + id,
-                totalTokens: try usageByMessage[id]!.total(file: "Claude", line: 0)
+                totalTokens: total,
+                dailyTokens: daily
             )
         }
     }
@@ -112,8 +144,9 @@ public struct ClaudeUsageImporter: Sendable {
         _ data: Data,
         file: URL,
         line: Int,
-        terminated: Bool
-    ) throws -> (String, TokenUsage)? {
+        terminated: Bool,
+        timestamps: UsageTimestampParser
+    ) throws -> (String, ClaudeMessageMetadata)? {
         if data.allSatisfy({ $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }) { return nil }
         let value: Any
         do { value = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) }
@@ -155,12 +188,33 @@ public struct ClaudeUsageImporter: Sendable {
             creation: count("cache_creation_input_tokens", required: false),
             read: count("cache_read_input_tokens", required: false)
         )
-        _ = try tokens.total(file: file.lastPathComponent, line: line)
-        return (id, tokens)
+        let total = try tokens.total(file: file.lastPathComponent, line: line)
+        return (id, ClaudeMessageMetadata(usage: tokens, highestObservedTotal: total,
+                                          timestamp: timestamps.date(record["timestamp"])))
     }
 }
 
-private struct TokenUsage {
+private struct ClaudeMessageMetadata: Sendable {
+    let usage: TokenUsage
+    let highestObservedTotal: Int64
+    let timestamp: Date?
+
+    func merging(_ other: Self) -> Self {
+        let timestamp: Date?
+        if highestObservedTotal > other.highestObservedTotal {
+            timestamp = self.timestamp
+        } else if highestObservedTotal < other.highestObservedTotal {
+            timestamp = other.timestamp
+        } else {
+            // Repeated equal counters must not move yesterday's completed message into today.
+            timestamp = [self.timestamp, other.timestamp].compactMap { $0 }.min()
+        }
+        return Self(usage: usage.merging(other.usage),
+                    highestObservedTotal: max(highestObservedTotal, other.highestObservedTotal), timestamp: timestamp)
+    }
+}
+
+private struct TokenUsage: Sendable {
     let input: Int64
     let output: Int64
     let creation: Int64

@@ -109,10 +109,12 @@ public struct PlayerCard: Identifiable, Codable, Equatable, Sendable {
 public struct UsageSnapshot: Equatable, Sendable {
     public let sourceID: String
     public let totalTokens: Int64
+    public let dailyTokens: [String: Int64]
 
-    public init(sourceID: String, totalTokens: Int64) {
+    public init(sourceID: String, totalTokens: Int64, dailyTokens: [String: Int64] = [:]) {
         self.sourceID = sourceID
         self.totalTokens = totalTokens
+        self.dailyTokens = dailyTokens
     }
 }
 

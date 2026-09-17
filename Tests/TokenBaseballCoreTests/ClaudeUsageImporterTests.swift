@@ -19,6 +19,97 @@ final class ClaudeUsageImporterTests: XCTestCase {
 
     private let importer = ClaudeUsageImporter()
 
+    func testMessageUsageUsesConfiguredTimezoneAndFinalCounterDate() throws {
+        try withFolder { folder in
+            try write(record(id: "msg_a", input: "10", output: "5", timestamp: "2026-09-16T14:59:00Z") +
+                      record(id: "msg_a", input: "10", output: "20", timestamp: "2026-09-16T15:01:00.123Z"),
+                      to: folder, file: "session.jsonl")
+            let korea = ClaudeUsageImporter(calendar: calendar("Asia/Seoul"))
+            XCTAssertEqual(try korea.read(folder: folder), [
+                UsageSnapshot(sourceID: "claude:msg_a", totalTokens: 30, dailyTokens: ["2026-09-17": 30])
+            ])
+            let utc = ClaudeUsageImporter(calendar: calendar("UTC"))
+            XCTAssertEqual(try utc.read(folder: folder).first?.dailyTokens, ["2026-09-16": 30])
+        }
+    }
+
+    func testEqualCounterCopiesUseEarliestDateRegardlessOfFileOrder() throws {
+        try withFolder { folder in
+            try write(record(id: "msg_a", timestamp: "2026-09-18T01:00:00Z"), to: folder, file: "a-copy.jsonl")
+            try write(record(id: "msg_a", timestamp: "2026-09-16T01:00:00Z"), to: folder, file: "z-original.jsonl")
+            let reader = ClaudeUsageImporter(calendar: calendar("UTC"))
+            XCTAssertEqual(try reader.read(folder: folder), [
+                UsageSnapshot(sourceID: "claude:msg_a", totalTokens: 15, dailyTokens: ["2026-09-16": 15])
+            ])
+        }
+    }
+
+    func testHistoricImportKeepsRecordDateAndMissingTimestampsStayUndated() throws {
+        try withFolder { folder in
+            try write(record(id: "history", timestamp: "2020-02-01T23:00:00Z") +
+                      record(id: "missing") + record(id: "invalid", timestamp: "not-a-timestamp"),
+                      to: folder, file: "session.jsonl")
+            let reader = ClaudeUsageImporter(calendar: calendar("UTC"))
+            let snapshots = try reader.read(folder: folder)
+            XCTAssertEqual(snapshots, [
+                UsageSnapshot(sourceID: "claude:history", totalTokens: 15, dailyTokens: ["2020-02-01": 15]),
+                UsageSnapshot(sourceID: "claude:invalid", totalTokens: 15),
+                UsageSnapshot(sourceID: "claude:missing", totalTokens: 15)
+            ])
+            XCTAssertEqual(try reader.read(folder: folder), snapshots)
+        }
+    }
+
+    func testUndatedLargerCounterDoesNotReuseAnEarlierIncompleteTimestamp() throws {
+        try withFolder { folder in
+            try write(record(id: "msg_a", output: "5", timestamp: "2026-09-16T23:59:00Z") +
+                      record(id: "msg_a", output: "20"), to: folder, file: "session.jsonl")
+            XCTAssertEqual(try importer.read(folder: folder), [UsageSnapshot(sourceID: "claude:msg_a", totalTokens: 30)])
+        }
+    }
+
+    func testCacheReusesMetadataAndRecomputesChangedMessageDate() throws {
+        try withFolder { folder in
+            let reader = ClaudeUsageImporter(calendar: calendar("UTC"))
+            try write(record(id: "msg_a", output: "10", timestamp: "2026-09-16T23:59:00Z"), to: folder, file: "session.jsonl")
+            let file = folder.appendingPathComponent("session.jsonl")
+            let modified = try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate]!
+            XCTAssertEqual(try reader.read(folder: folder).first?.dailyTokens, ["2026-09-16": 20])
+            XCTAssertEqual(reader.parsedFileCount, 1)
+            _ = try reader.read(folder: folder)
+            XCTAssertEqual(reader.parsedFileCount, 1)
+            // Restoring mtime after a same-size edit cannot serve stale parsed counters.
+            try write(record(id: "msg_a", output: "20", timestamp: "2026-09-17T00:01:00Z"), to: folder, file: "session.jsonl")
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+            XCTAssertEqual(try reader.read(folder: folder).first?.dailyTokens, ["2026-09-17": 30])
+            XCTAssertEqual(reader.parsedFileCount, 2)
+            try FileManager.default.removeItem(at: file)
+            XCTAssertEqual(try reader.read(folder: folder), [])
+        }
+    }
+
+    @MainActor
+    func testSharedImporterCanReadConcurrently() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try write(record(id: "msg_a"), to: folder, file: "session.jsonl")
+        let reader = ClaudeUsageImporter()
+        let results = try await withThrowingTaskGroup(of: [UsageSnapshot].self) { group in
+            for _ in 0..<4 { group.addTask { try reader.read(folder: folder) } }
+            var results: [[UsageSnapshot]] = []
+            for try await result in group { results.append(result) }
+            return results
+        }
+        XCTAssertEqual(results.count, 4)
+        XCTAssertTrue(results.allSatisfy { $0 == [UsageSnapshot(sourceID: "claude:msg_a", totalTokens: 15)] })
+    }
+
+    private func calendar(_ zone: String) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: zone)!
+        return calendar
+    }
+
     func testCountsEachCacheCategoryOnceAndIgnoresNestedBreakdown() throws {
         try withFolder { folder in
             try write(record(id: "msg_cache", input: "7", output: "11", creation: "120", read: "900",
@@ -171,6 +262,7 @@ final class ClaudeUsageImporterTests: XCTestCase {
     func testUnreadableTranscriptFails() throws {
         try withFolder { folder in
             try write(record(id: "msg_a"), to: folder, file: "session.jsonl")
+            _ = try importer.read(folder: folder)
             let file = folder.appendingPathComponent("session.jsonl")
             try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file.path)
             defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
@@ -179,8 +271,9 @@ final class ClaudeUsageImporterTests: XCTestCase {
     }
 
     private func record(id: String, input: String = "10", output: String = "5",
-                        creation: String = "0", read: String = "0", extra: String = "") -> String {
-        "{\"type\":\"assistant\",\"message\":{\"id\":\"\(id)\",\"usage\":{\"input_tokens\":\(input),\"output_tokens\":\(output),\"cache_creation_input_tokens\":\(creation),\"cache_read_input_tokens\":\(read)\(extra)}}}\n"
+                        creation: String = "0", read: String = "0", extra: String = "", timestamp: String? = nil) -> String {
+        let field = timestamp.map { "\"timestamp\":\"\($0)\"," } ?? ""
+        return "{\(field)\"type\":\"assistant\",\"message\":{\"id\":\"\(id)\",\"usage\":{\"input_tokens\":\(input),\"output_tokens\":\(output),\"cache_creation_input_tokens\":\(creation),\"cache_read_input_tokens\":\(read)\(extra)}}}\n"
     }
 
     private func write(_ text: String, to folder: URL, file: String) throws {

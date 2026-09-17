@@ -19,6 +19,96 @@ final class CodexUsageImporterTests: XCTestCase {
 
     private let importer = CodexUsageImporter()
 
+    func testDailyGrowthUsesTimestampOrderAcrossLocalMidnight() throws {
+        try withFolder { folder in
+            try write([metadata("a"),
+                       tokens("170", timestamp: "2026-09-17T00:00:00.123Z"),
+                       tokens("100", timestamp: "2026-09-16T14:59:00Z"),
+                       tokens("150", timestamp: "2026-09-16T15:01:00Z"),
+                       tokens("140", timestamp: "2026-09-17T00:01:00Z")], to: "session.jsonl", in: folder)
+            let korea = CodexUsageImporter(calendar: calendar("Asia/Seoul"))
+            XCTAssertEqual(try korea.read(folder: folder), [
+                UsageSnapshot(sourceID: "codex:a", totalTokens: 170,
+                              dailyTokens: ["2026-09-16": 100, "2026-09-17": 70])
+            ])
+            let utc = CodexUsageImporter(calendar: calendar("UTC"))
+            XCTAssertEqual(try utc.read(folder: folder).first?.dailyTokens, ["2026-09-16": 150, "2026-09-17": 20])
+        }
+    }
+
+    func testHistoricAndCopiedEventsDoNotBecomeUsageOnImportDay() throws {
+        try withFolder { folder in
+            let old = [metadata("history"), tokens("100", timestamp: "2020-02-01T23:00:00Z"),
+                       tokens("160", timestamp: "2020-02-02T01:00:00Z")]
+            try write(old, to: "sessions/original.jsonl", in: folder)
+            try write(old + [tokens("160", timestamp: "2020-02-02T04:00:00Z")], to: "archived_sessions/copy.jsonl", in: folder)
+            let reader = CodexUsageImporter(calendar: calendar("UTC"))
+            let expected = [UsageSnapshot(sourceID: "codex:history", totalTokens: 160,
+                                          dailyTokens: ["2020-02-01": 100, "2020-02-02": 60])]
+            XCTAssertEqual(try reader.read(folder: folder), expected)
+            XCTAssertEqual(try reader.read(folder: folder), expected)
+        }
+    }
+
+    func testMissingAndInvalidTimestampsRemainAnUndatedBaseline() throws {
+        try withFolder { folder in
+            try write([metadata("a"), tokens("100"), tokens("120", timestamp: "not-a-timestamp"),
+                       tokens("170", timestamp: "2026-09-17T01:00:00Z")], to: "session.jsonl", in: folder)
+            let reader = CodexUsageImporter(calendar: calendar("UTC"))
+            XCTAssertEqual(try reader.read(folder: folder), [
+                UsageSnapshot(sourceID: "codex:a", totalTokens: 170, dailyTokens: ["2026-09-17": 50])
+            ])
+            try write([metadata("a"), tokens("200")], to: "session.jsonl", in: folder)
+            XCTAssertEqual(try reader.read(folder: folder), [UsageSnapshot(sourceID: "codex:a", totalTokens: 200)])
+        }
+    }
+
+    func testUnchangedFilesUseMetadataCacheAndEditsInvalidateIt() throws {
+        try withFolder { folder in
+            let reader = CodexUsageImporter(calendar: calendar("UTC"))
+            try write([metadata("a"), tokens("100", timestamp: "2026-09-17T01:00:00Z")], to: "session.jsonl", in: folder)
+            let file = folder.appendingPathComponent("session.jsonl")
+            let modified = try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate]!
+            XCTAssertEqual(try reader.read(folder: folder).first?.totalTokens, 100)
+            XCTAssertEqual(reader.parsedFileCount, 1)
+            XCTAssertEqual(try reader.read(folder: folder).first?.totalTokens, 100)
+            XCTAssertEqual(reader.parsedFileCount, 1)
+            // Same size and restored mtime still invalidate via inode/ctime fingerprinting.
+            try write([metadata("a"), tokens("200", timestamp: "2026-09-17T01:00:00Z")], to: "session.jsonl", in: folder)
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+            XCTAssertEqual(try reader.read(folder: folder).first?.totalTokens, 200)
+            XCTAssertEqual(reader.parsedFileCount, 2)
+            try write([metadata("a"), tokens("200", timestamp: "2026-09-17T01:00:00Z"),
+                       tokens("250", timestamp: "2026-09-17T02:00:00Z")], to: "session.jsonl", in: folder)
+            XCTAssertEqual(try reader.read(folder: folder).first?.dailyTokens, ["2026-09-17": 250])
+            XCTAssertEqual(reader.parsedFileCount, 3)
+            try FileManager.default.removeItem(at: file)
+            XCTAssertEqual(try reader.read(folder: folder), [])
+        }
+    }
+
+    @MainActor
+    func testSharedImporterCanReadConcurrently() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try write([metadata("a"), tokens("100")], to: "session.jsonl", in: folder)
+        let reader = CodexUsageImporter()
+        let results = try await withThrowingTaskGroup(of: [UsageSnapshot].self) { group in
+            for _ in 0..<4 { group.addTask { try reader.read(folder: folder) } }
+            var results: [[UsageSnapshot]] = []
+            for try await result in group { results.append(result) }
+            return results
+        }
+        XCTAssertEqual(results.count, 4)
+        XCTAssertTrue(results.allSatisfy { $0 == [UsageSnapshot(sourceID: "codex:a", totalTokens: 100)] })
+    }
+
+    private func calendar(_ zone: String) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: zone)!
+        return calendar
+    }
+
     func testDesktopSessionIDRemainsStableAcrossResumedMetadataAndCopiedFiles() throws {
         try withFolder { folder in
             let first = #"{"type":"session_meta","payload":{"id":"metadata-one","session_id":"stable-session"}}"#
@@ -210,8 +300,10 @@ final class CodexUsageImporterTests: XCTestCase {
         #"{"type":"session_meta","payload":{"id":""# + id + #""}}"#
     }
 
-    private func tokens(_ value: String) -> String {
-        #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":"# + value + #"}}}}"#
+    private func tokens(_ value: String, timestamp: String? = nil) -> String {
+        let record = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":"# + value + #"}}}}"#
+        guard let timestamp else { return record }
+        return "{\"timestamp\":\"\(timestamp)\"," + String(record.dropFirst())
     }
 
     private func write(_ lines: [String], to path: String, in folder: URL, finalNewline: Bool = true) throws {

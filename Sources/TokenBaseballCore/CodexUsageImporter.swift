@@ -1,4 +1,5 @@
 import CoreFoundation
+import Darwin
 import Foundation
 
 /// Reads cumulative token counts from user-selected Codex rollout files.
@@ -9,7 +10,13 @@ public struct CodexUsageImporter: Sendable {
     private static let maximumFiles = 10_000
     private static let maximumEntries = 100_000
 
-    public init() {}
+    private let calendar: Calendar
+    private let cache = UsageFileCache<CodexSessionMetadata>()
+
+    public init(calendar: Calendar = .autoupdatingCurrent) { self.calendar = calendar }
+
+    // Internal diagnostics allow deterministic cache regression tests without timing assertions.
+    var parsedFileCount: Int { cache.parsedFileCount }
 
     /// Returns one maximum cumulative count per session, including archived copies.
     /// Throws without returning partial results when any complete record is invalid.
@@ -36,15 +43,43 @@ public struct CodexUsageImporter: Sendable {
         let roots = !availableRoots.isEmpty || selectedFolder.lastPathComponent == ".codex"
             ? availableRoots : [selectedFolder]
         let files = try rolloutFiles(in: roots)
-        var totals: [String: Int64] = [:]
+        var sessions: [String: CodexSessionMetadata] = [:]
         var bytesRead = 0
+        let timestamps = UsageTimestampParser()
         for file in files {
             try Task.checkCancellation()
-            if let session = try readFile(file, bytesRead: &bytesRead) {
-                totals[session.id] = max(totals[session.id] ?? 0, session.tokens)
+            let signature = try UsageFileSignature(file)
+            let session: CodexSessionMetadata
+            if let cached = cache.value(for: file.path, signature: signature) {
+                session = cached
+            } else {
+                cache.recordParse()
+                session = try readFile(file, bytesRead: &bytesRead, timestamps: timestamps)
+                // A live writer can append while we read. Never cache that mixed file version.
+                if try UsageFileSignature(file) == signature {
+                    cache.store(session, for: file.path, signature: signature)
+                }
+            }
+            if let id = session.id {
+                sessions[id, default: CodexSessionMetadata()].merge(session)
             }
         }
-        return totals.keys.sorted().map { UsageSnapshot(sourceID: "codex:" + $0, totalTokens: totals[$0]!) }
+        cache.retain(paths: Set(files.map(\.path)))
+        let calendar = usageDayCalendar(calendar)
+        return try sessions.keys.sorted().map { id in
+            try Task.checkCancellation()
+            let session = sessions[id]!
+            var highWater = session.undatedMaximum
+            var daily: [String: Int64] = [:]
+            for timestamp in session.datedTotals.keys.sorted() {
+                try Task.checkCancellation()
+                let tokens = session.datedTotals[timestamp]!
+                guard tokens > highWater else { continue }
+                daily[usageDayKey(timestamp, calendar: calendar), default: 0] += tokens - highWater
+                highWater = tokens
+            }
+            return UsageSnapshot(sourceID: "codex:" + id, totalTokens: session.maximumTokens, dailyTokens: daily)
+        }
     }
 
     private func rolloutFiles(in roots: [URL]) throws -> [URL] {
@@ -81,12 +116,13 @@ public struct CodexUsageImporter: Sendable {
         return files.sorted { $0.path < $1.path }
     }
 
-    private func readFile(_ file: URL, bytesRead: inout Int) throws -> (id: String, tokens: Int64)? {
+    private func readFile(_ file: URL, bytesRead: inout Int, timestamps: UsageTimestampParser) throws -> CodexSessionMetadata {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         var pending = Data()
         var sessionID: String?
-        var maximumTokens: Int64?
+        var session = CodexSessionMetadata()
+        var hasUsage = false
         var lineNumber = 0
         while let chunk = try handle.read(upToCount: 64 * 1_024), !chunk.isEmpty {
             try Task.checkCancellation()
@@ -98,22 +134,24 @@ public struct CodexUsageImporter: Sendable {
                 guard line.count <= Self.maximumLineBytes else { throw CodexUsageImportError.resourceLimit }
                 lineNumber += 1
                 try parse(line, complete: true, lineNumber: lineNumber,
-                          sessionID: &sessionID, maximumTokens: &maximumTokens)
+                          sessionID: &sessionID, session: &session, hasUsage: &hasUsage, timestamps: timestamps)
                 pending.removeSubrange(...newline)
             }
             guard pending.count <= Self.maximumLineBytes else { throw CodexUsageImportError.resourceLimit }
         }
         if !pending.isEmpty {
             try parse(pending, complete: false, lineNumber: lineNumber + 1,
-                      sessionID: &sessionID, maximumTokens: &maximumTokens)
+                      sessionID: &sessionID, session: &session, hasUsage: &hasUsage, timestamps: timestamps)
         }
-        guard let maximumTokens else { return nil }
+        guard hasUsage else { return CodexSessionMetadata() }
         guard let sessionID else { throw CodexUsageImportError.missingSessionMetadata }
-        return (sessionID, maximumTokens)
+        session.id = sessionID
+        return session
     }
 
     private func parse(_ line: Data, complete: Bool, lineNumber: Int,
-                       sessionID: inout String?, maximumTokens: inout Int64?) throws {
+                       sessionID: inout String?, session: inout CodexSessionMetadata,
+                       hasUsage: inout Bool, timestamps: UsageTimestampParser) throws {
         if line.allSatisfy({ [0x20, 0x09, 0x0D].contains($0) }) { return }
         let value: Any
         do {
@@ -156,11 +194,110 @@ public struct CodexUsageImporter: Sendable {
                   let tokens = Int64(number.stringValue), tokens >= 0 else {
                 throw CodexUsageImportError.invalidTokenCount(line: lineNumber)
             }
-            maximumTokens = max(maximumTokens ?? 0, tokens)
+            hasUsage = true
+            session.maximumTokens = max(session.maximumTokens, tokens)
+            if let timestamp = timestamps.date(record["timestamp"]) {
+                session.datedTotals[timestamp] = max(session.datedTotals[timestamp] ?? 0, tokens)
+            } else {
+                // Undated usage is a baseline, never implicitly attributed to the import day.
+                session.undatedMaximum = max(session.undatedMaximum, tokens)
+            }
         default:
             break
         }
     }
+}
+
+private struct CodexSessionMetadata: Sendable {
+    var id: String?
+    var maximumTokens: Int64 = 0
+    var undatedMaximum: Int64 = 0
+    var datedTotals: [Date: Int64] = [:]
+
+    mutating func merge(_ other: Self) {
+        maximumTokens = max(maximumTokens, other.maximumTokens)
+        undatedMaximum = max(undatedMaximum, other.undatedMaximum)
+        for (timestamp, count) in other.datedTotals {
+            datedTotals[timestamp] = max(datedTotals[timestamp] ?? 0, count)
+        }
+    }
+}
+
+// Shared utilities cache token metadata only; no transcript bytes or conversation content survive.
+struct UsageFileSignature: Equatable, Sendable {
+    let size: Int64
+    let device: Int32
+    let inode: UInt64
+    let mode: UInt16
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    init(_ file: URL) throws {
+        var info = stat()
+        guard lstat(file.path, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG,
+              FileManager.default.isReadableFile(atPath: file.path) else {
+            throw POSIXError(.EACCES)
+        }
+        size = info.st_size
+        device = info.st_dev
+        inode = info.st_ino
+        mode = info.st_mode
+        modifiedSeconds = info.st_mtimespec.tv_sec
+        modifiedNanoseconds = info.st_mtimespec.tv_nsec
+        changedSeconds = info.st_ctimespec.tv_sec
+        changedNanoseconds = info.st_ctimespec.tv_nsec
+    }
+}
+
+final class UsageFileCache<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: (UsageFileSignature, Value)] = [:]
+    private var parses = 0
+
+    var parsedFileCount: Int { lock.withLock { parses } }
+    func recordParse() { lock.withLock { parses += 1 } }
+    func value(for path: String, signature: UsageFileSignature) -> Value? {
+        lock.withLock {
+            guard let entry = entries[path], entry.0 == signature else { return nil }
+            return entry.1
+        }
+    }
+    func store(_ value: Value, for path: String, signature: UsageFileSignature) {
+        lock.withLock { entries[path] = (signature, value) }
+    }
+    func retain(paths: Set<String>) {
+        lock.withLock { entries = entries.filter { paths.contains($0.key) } }
+    }
+}
+
+final class UsageTimestampParser {
+    private let fractional = ISO8601DateFormatter()
+    private let seconds = ISO8601DateFormatter()
+
+    init() {
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        seconds.formatOptions = [.withInternetDateTime]
+    }
+    func date(_ value: Any?) -> Date? {
+        guard let text = value as? String else { return nil }
+        return fractional.date(from: text) ?? seconds.date(from: text)
+    }
+}
+
+func usageDayCalendar(_ selected: Calendar) -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = selected.timeZone
+    return calendar
+}
+
+func usageDayKey(_ date: Date, calendar: Calendar) -> String {
+    let parts = calendar.dateComponents([.year, .month, .day], from: date)
+    return String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!)
 }
 
 public enum CodexUsageImportError: LocalizedError, Equatable {
