@@ -44,23 +44,23 @@ struct RosterFieldCard: View {
     let portraitSize: CGFloat
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 3) {
             if let card {
                 RosterPlayerPortrait(card: card, size: portraitSize)
-                Text(card.name).font(.callout.weight(.semibold)).lineLimit(1)
+                Text(card.name).font(.caption.weight(.semibold)).lineLimit(1)
             } else {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(.quaternary)
                     .frame(width: portraitSize, height: portraitSize)
                     .overlay { Text("빈자리").font(.caption).foregroundStyle(.secondary) }
-                Text("선수 등록").font(.callout.weight(.semibold))
+                Text("선수 등록").font(.caption.weight(.semibold))
             }
             Text("\(position.abbreviation) · \(position.title)")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(.secondary)
         }
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 4)
         .background(.background, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.16)))
         .contentShape(RoundedRectangle(cornerRadius: 12))

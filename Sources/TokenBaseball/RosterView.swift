@@ -29,22 +29,9 @@ struct RosterView: View {
     }
 
     private var defensiveField: some View {
-        GeometryReader { geometry in
-            ZStack {
-                BaseballGrass().fill(Color.green.opacity(0.12))
-                BaseballDiamond().fill(Color.brown.opacity(0.12))
-                BaseballDiamond().stroke(Color.primary.opacity(0.24), lineWidth: 2)
-                ForEach(FieldPosition.allCases) { position in
-                    let point = fieldPoint(position)
-                    fieldSlot(position, portraitSize: max(0, min(84, geometry.size.width * 0.185 - 12)))
-                        .frame(width: min(128, geometry.size.width * 0.185), height: 140)
-                        .position(x: geometry.size.width * point.x, y: geometry.size.height * point.y)
-                }
-            }
+        BaseballField { position, portraitSize in
+            fieldSlot(position, portraitSize: portraitSize)
         }
-        .frame(height: 640)
-        .frame(maxWidth: 900)
-        .frame(maxWidth: .infinity)
     }
 
     private func fieldSlot(_ position: FieldPosition, portraitSize: CGFloat) -> some View {
@@ -110,42 +97,4 @@ struct RosterView: View {
         }
     }
 
-    /// Coordinates follow the defense as seen from home plate; the catcher sits behind home.
-    private func fieldPoint(_ position: FieldPosition) -> CGPoint {
-        switch position {
-        case .leftField: CGPoint(x: 0.15, y: 0.16)
-        case .centerField: CGPoint(x: 0.50, y: 0.12)
-        case .rightField: CGPoint(x: 0.85, y: 0.16)
-        case .shortstop: CGPoint(x: 0.34, y: 0.36)
-        case .secondBase: CGPoint(x: 0.66, y: 0.36)
-        case .thirdBase: CGPoint(x: 0.15, y: 0.59)
-        case .firstBase: CGPoint(x: 0.85, y: 0.59)
-        case .pitcher: CGPoint(x: 0.50, y: 0.59)
-        case .catcher: CGPoint(x: 0.50, y: 0.87)
-        }
-    }
-}
-
-private struct BaseballGrass: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.width * 0.50, y: rect.height * 0.81))
-        path.addLine(to: CGPoint(x: rect.width * 0.02, y: rect.height * 0.28))
-        path.addQuadCurve(to: CGPoint(x: rect.width * 0.98, y: rect.height * 0.28),
-                          control: CGPoint(x: rect.width * 0.50, y: -rect.height * 0.20))
-        path.closeSubpath()
-        return path
-    }
-}
-
-private struct BaseballDiamond: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.width * 0.50, y: rect.height * 0.81))
-        path.addLine(to: CGPoint(x: rect.width * 0.78, y: rect.height * 0.53))
-        path.addLine(to: CGPoint(x: rect.width * 0.50, y: rect.height * 0.25))
-        path.addLine(to: CGPoint(x: rect.width * 0.22, y: rect.height * 0.53))
-        path.closeSubpath()
-        return path
-    }
 }
