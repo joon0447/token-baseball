@@ -1,3 +1,5 @@
+import CoreFoundation
+import Darwin
 import Foundation
 
 public protocol SnapshotPersistence {
@@ -5,27 +7,48 @@ public protocol SnapshotPersistence {
     func save(_ state: GameState) throws
 }
 
+/// A single store's disk session. Give each GameStore its own instance so its
+/// last-loaded snapshot cannot be replaced by a different store's load/save.
 public final class JSONDiskPersistence: SnapshotPersistence {
     public let url: URL
+    private var expectedSnapshot: GameState?
 
     public init(url: URL) { self.url = url }
 
     public func load() throws -> GameState? {
+        try withFileLock {
+            let snapshot = try readSnapshot()
+            expectedSnapshot = snapshot
+            return snapshot
+        }
+    }
+
+    private func readSnapshot() throws -> GameState? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        let envelope: SchemaEnvelope
+        let object: [String: Any]
         do {
-            envelope = try decoder.decode(SchemaEnvelope.self, from: data)
+            guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw GameError.corruptSave
+            }
+            object = parsed
         } catch {
             throw GameError.corruptSave
         }
-        guard envelope.schemaVersion == GameState.currentSchemaVersion else {
-            throw GameError.unsupportedSchema(envelope.schemaVersion)
+        let schemaVersion = try exactNonnegativeInteger(object["schemaVersion"])
+        guard schemaVersion == Int64(GameState.currentSchemaVersion) else {
+            throw GameError.unsupportedSchema(Int(schemaVersion))
         }
+        // JSONDecoder can round large fractional literals while decoding Int64.
+        // Check the original JSON number types before decoding the stored ledger.
+        for key in ["totalTokens", "earnedCurrency", "spentCurrency"] {
+            _ = try exactNonnegativeInteger(object[key])
+        }
+        guard let sourceTotals = object["sourceTotals"] as? [String: Any] else { throw GameError.corruptSave }
+        for total in sourceTotals.values { _ = try exactNonnegativeInteger(total) }
         let state: GameState
         do {
-            state = try decoder.decode(GameState.self, from: data)
+            state = try JSONDecoder().decode(GameState.self, from: data)
         } catch {
             throw GameError.corruptSave
         }
@@ -35,17 +58,44 @@ public final class JSONDiskPersistence: SnapshotPersistence {
 
     public func save(_ state: GameState) throws {
         try state.validate()
-        // Never silently replace a file that this version cannot read.
-        _ = try load()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
+        try withFileLock {
+            // Reading here must not advance the expected snapshot on a conflict.
+            // Invalid or unsupported files also remain untouched.
+            guard try readSnapshot() == expectedSnapshot else { throw GameError.staleSave }
+            try data.write(to: url, options: .atomic)
+            expectedSnapshot = state
+        }
     }
 
-    private struct SchemaEnvelope: Decodable {
-        let schemaVersion: Int
+    private func exactNonnegativeInteger(_ value: Any?) throws -> Int64 {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: number.objCType)),
+              let integer = Int64(number.stringValue), integer >= 0 else {
+            throw GameError.corruptSave
+        }
+        return integer
+    }
+
+    private func withFileLock<T>(_ body: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lockURL = url.appendingPathExtension("lock")
+        let descriptor = lockURL.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { errno = EINVAL; return -1 }
+            return Darwin.open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, mode_t(S_IRUSR | S_IWUSR))
+        }
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { _ = Darwin.close(descriptor) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        // Keep the sidecar after unlocking; deleting it could split concurrent
+        // writers across different lock-file inodes.
+        return try body()
     }
 }
 

@@ -158,6 +158,7 @@ public enum GameError: LocalizedError, Equatable {
     case invalidFolder
     case unsupportedSchema(Int)
     case corruptSave
+    case staleSave
     case invalidState(String)
 
     public var errorDescription: String? {
@@ -173,6 +174,7 @@ public enum GameError: LocalizedError, Equatable {
         case .invalidFolder: "사용량을 읽을 폴더 경로를 확인해 주세요."
         case let .unsupportedSchema(version): "저장 파일 버전 \(version)은 이 앱에서 열 수 없어요. 원본 파일은 보존했어요."
         case .corruptSave: "저장 파일을 읽을 수 없어요. 원본 파일은 보존했어요."
+        case .staleSave: "다른 실행에서 저장 데이터가 바뀌었어요. 앱을 다시 열어 최신 기록을 불러온 뒤 시도해 주세요."
         case let .invalidState(reason): "저장 데이터가 올바르지 않아요: \(reason). 원본 파일은 보존했어요."
         }
     }
